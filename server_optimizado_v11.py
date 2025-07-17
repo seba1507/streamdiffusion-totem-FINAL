@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import os
 import sys
+
+# IMPORTANTE: Aplicar el parche ANTES de cualquier otra importación
+import polygraphy_patch
+
 import time
 import asyncio
 import io
