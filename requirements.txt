@@ -1,12 +1,12 @@
-# PyTorch and CUDA
+# PyTorch and CUDA - Compatible with RTX A6000 and RTX 4090
 --extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.1.0
 torchvision==0.16.0
 
-# XFormers - Compatible with PyTorch 2.1.0
+# XFormers - Version compatible with PyTorch 2.1.0
 xformers==0.0.23
 
-# Diffusers Stack
+# Diffusers and AI Stack
 diffusers==0.24.0
 transformers==4.36.2
 accelerate==0.25.0
@@ -17,9 +17,13 @@ safetensors==0.4.1
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 websockets==12.0
+starlette
 
 # Image Processing
-pillow==10.1.0
 opencv-python-headless==4.8.1.78
+pillow==10.1.0
 numpy==1.24.3
 scipy==1.11.4
+
+# Utilities
+tqdm
