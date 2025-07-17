@@ -6,6 +6,7 @@ import asyncio
 import io
 import base64
 from pathlib import Path
+from typing import Union
 
 # --- CONFIGURACIÓN DE ALTO RENDIMIENTO (Ajustable) ---
 MODEL_ID = "SimianLuo/LCM_Dreamshaper_v7"
@@ -21,22 +22,17 @@ WIDTH, HEIGHT = 512, 512
 # ---------------------------------------------------------
 
 # --- INICIO CORRECTO DE PYTORCH Y CUDA ---
-
-# 1. Importar torch ANTES de usarlo.
 import torch
-
-# 2. Configurar el entorno y verificar la disponibilidad de CUDA.
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 if not torch.cuda.is_available():
-    print("FATAL: CUDA no está disponible. Revisa los drivers de NVIDIA y PyTorch.", file=sys.stderr)
+    print("FATAL: CUDA no está disponible.", file=sys.stderr)
     sys.exit(1)
-
-# 3. Ahora que 'torch' está importado y CUDA verificado, definir las variables dependientes.
 device = torch.device("cuda")
 dtype = torch.float16
 print(f"✅ CUDA detectado: {torch.cuda.get_device_name(0)} | Usando precisión: {dtype}")
 
-# 4. Importar el resto de librerías pesadas.
+# --- Importaciones de Librerías de IA ---
+from diffusers import AutoPipelineForImage2Image, LCMScheduler
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
 from streamdiffusion.acceleration.tensorrt import accelerate_with_tensorrt
@@ -54,29 +50,33 @@ class StreamProcessor:
         print("✅ Procesador de Stream optimizado y listo.")
 
     def _initialize_pipeline(self) -> StreamDiffusion:
-        print("🚀 Inicializando pipeline de StreamDiffusion...")
+        print("🚀 Inicializando pipeline... (Este es el paso final)")
         
+        # --- NUEVO MÉTODO DE INICIALIZACIÓN ---
+        # 1. Cargar el modelo base con diffusers
+        print(f"--> Cargando modelo '{MODEL_ID}' con diffusers...")
+        pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype, variant="fp16")
+        pipe.to(device=device)
+
+        # 2. Inicializar StreamDiffusion pasándole el pipeline ya cargado
+        print("--> Configurando StreamDiffusion...")
         stream = StreamDiffusion(
-            model_id_or_path=MODEL_ID,
+            pipe=pipe,
             t_index_list=[0, 16, 32, 45],
             frame_buffer_size=1,
             width=WIDTH,
             height=HEIGHT,
-            device=device,
-            dtype=dtype,
             use_tiny_vae=TINY_VAE_ID,
         )
-        
-        print(f"🔄 Cargando modelo base '{MODEL_ID}'...")
+        # ------------------------------------------
+
+        print(f"--> Cargando y fusionando LoRA LCM...")
         stream.load_lcm_lora()
         stream.fuse_lora()
-        print("✅ LoRA LCM cargado y fusionado con el modelo base.")
-
+        
         print("⚡ Acelerando con TensorRT (puede tardar varios minutos la primera vez)...")
         try:
-            stream = accelerate_with_tensorrt(
-                stream, ENGINE_DIR, max_batch_size=2,
-            )
+            stream = accelerate_with_tensorrt(stream, ENGINE_DIR, max_batch_size=2)
             print("✅ Pipeline acelerado con TensorRT exitosamente.")
         except Exception as e:
             print(f"⚠️ Advertencia: Falló la aceleración con TensorRT. {e}", file=sys.stderr)
@@ -119,11 +119,12 @@ class StreamProcessor:
         processing_time_ms = (time.time() - start_time) * 1000
         self.frame_times.append(processing_time_ms)
         if len(self.frame_times) > 100: self.frame_times.pop(0)
-        avg_latency = sum(self.frame_times) / len(self.frame_times)
+        avg_latency = sum(self.frame_times) / len(self.frame_times) if self.frame_times else 0
         fps = 1000 / avg_latency if avg_latency > 0 else 0
         stats = {"fps": round(fps, 1), "latency": round(processing_time_ms, 1)}
         return output_image, stats
 
+# --- SERVIDOR WEB FASTAPI (Sin cambios) ---
 app = FastAPI()
 processor = StreamProcessor()
 
