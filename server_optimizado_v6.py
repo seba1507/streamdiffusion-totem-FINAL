@@ -44,12 +44,15 @@ from PIL import Image
 
 class StreamProcessor:
     def __init__(self):
-        self.stream = self._initialize_pipeline()
+        # --- LÓGICA CORREGIDA ---
+        # Definir los atributos ANTES de llamar a la inicialización del pipeline
         self.last_latents = None
         self.frame_times = []
-        # Para llevar un registro del prompt actual sin acceder a atributos internos
         self.current_prompt = DEFAULT_PROMPT
         self.current_guidance = DEFAULT_GUIDANCE_SCALE
+        
+        # Ahora llamar a la inicialización, que usará los atributos de arriba
+        self.stream = self._initialize_pipeline()
         print("✅ Procesador de Stream optimizado y listo.")
 
     def _initialize_pipeline(self) -> StreamDiffusion:
@@ -96,8 +99,6 @@ class StreamProcessor:
     def process_frame(self, image: Image.Image, params: dict) -> (Image.Image, dict):
         start_time = time.time()
         
-        # --- LÓGICA CORREGIDA ---
-        # Comprobar si el prompt o la guía han cambiado usando nuestro propio registro
         if self.current_prompt != params['prompt'] or self.current_guidance != params['guidance_scale']:
             self.stream.prepare(
                 prompt=params['prompt'],
@@ -105,7 +106,6 @@ class StreamProcessor:
                 num_inference_steps=50,
                 guidance_scale=params['guidance_scale'],
             )
-            # Actualizar nuestro registro
             self.current_prompt = params['prompt']
             self.current_guidance = params['guidance_scale']
         
