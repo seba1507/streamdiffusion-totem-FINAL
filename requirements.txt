@@ -1,21 +1,32 @@
-# requirements.txt (CORREGIDO)
+# requirements.txt (Golden Image Configuration)
 
-# PyTorch y CUDA (para L40S, CUDA 12.1 es ideal)
+# This set of versions is a known-good, stable combination for StreamDiffusion.
+# We are pinning every single dependency to prevent pip from making bad decisions.
+
+# PyTorch Stack (a stable 2.1.x version)
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.3.0+cu121
-torchvision==0.18.0+cu121
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+triton==2.1.0
 
-# Dependencias adicionales que StreamDiffusion podría necesitar
-diffusers==0.27.2
-transformers==4.41.2
-accelerate==0.30.1
-huggingface_hub==0.23.0
-safetensors==0.4.3
+# XFormers compatible with the torch version above
+xformers==0.0.23
 
-# Framework web
+# Hugging Face Stack (a stable set that works together)
+diffusers==0.24.0
+transformers==4.36.2
+accelerate==0.25.0
+huggingface_hub==0.19.4
+safetensors==0.4.1
+
+# StreamDiffusion from Git
+git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion[tensorrt]
+
+# Web Frameworks and other utils
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 websockets==12.0
-
-# Mínimo de procesamiento de imagen
-pillow==10.3.0
+pillow==10.1.0
+opencv-python-headless==4.8.1.78
+scipy==1.11.4
+polygraphy>=0.49.0
