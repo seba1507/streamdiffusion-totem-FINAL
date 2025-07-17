@@ -47,16 +47,17 @@ class StreamProcessor:
         self.stream = self._initialize_pipeline()
         self.last_latents = None
         self.frame_times = []
+        # Para llevar un registro del prompt actual sin acceder a atributos internos
+        self.current_prompt = DEFAULT_PROMPT
+        self.current_guidance = DEFAULT_GUIDANCE_SCALE
         print("✅ Procesador de Stream optimizado y listo.")
 
     def _initialize_pipeline(self) -> StreamDiffusion:
-        print("🚀 Inicializando pipeline... (Este es el paso final)")
+        print("🚀 Inicializando pipeline...")
         
-        # --- MÉTODO DE INICIALIZACIÓN FINAL Y CORRECTO ---
         print(f"--> Cargando modelo '{MODEL_ID}' con diffusers...")
         pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype)
         
-        # Cargar y reemplazar el VAE con la versión Tiny para máxima velocidad.
         print(f"--> Cargando TinyVAE '{TINY_VAE_ID}'...")
         pipe.vae = AutoencoderTiny.from_pretrained(TINY_VAE_ID, torch_dtype=dtype)
         pipe.to(device=device)
@@ -69,13 +70,12 @@ class StreamProcessor:
             width=WIDTH,
             height=HEIGHT,
         )
-        # ----------------------------------------------------
 
         print(f"--> Cargando y fusionando LoRA LCM...")
         stream.load_lcm_lora()
         stream.fuse_lora()
         
-        print("⚡ Acelerando con TensorRT (puede tardar varios minutos la primera vez)...")
+        print("⚡ Acelerando con TensorRT...")
         try:
             stream = accelerate_with_tensorrt(stream, ENGINE_DIR, max_batch_size=2)
             print("✅ Pipeline acelerado con TensorRT exitosamente.")
@@ -84,10 +84,10 @@ class StreamProcessor:
 
         print("🔥 Pre-calentando el pipeline...")
         stream.prepare(
-            prompt=DEFAULT_PROMPT,
+            prompt=self.current_prompt,
             negative_prompt=DEFAULT_NEGATIVE_PROMPT,
             num_inference_steps=50,
-            guidance_scale=DEFAULT_GUIDANCE_SCALE,
+            guidance_scale=self.current_guidance,
         )
         print("✅ Pipeline listo para recibir frames.")
         return stream
@@ -95,17 +95,24 @@ class StreamProcessor:
     @torch.no_grad()
     def process_frame(self, image: Image.Image, params: dict) -> (Image.Image, dict):
         start_time = time.time()
-        input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
-        noise = torch.randn_like(input_tensor) * 0.02
-        input_tensor = torch.clamp(input_tensor + noise, 0, 1)
-
-        if self.stream.prompt != params['prompt'] or self.stream.guidance_scale != params['guidance_scale']:
+        
+        # --- LÓGICA CORREGIDA ---
+        # Comprobar si el prompt o la guía han cambiado usando nuestro propio registro
+        if self.current_prompt != params['prompt'] or self.current_guidance != params['guidance_scale']:
             self.stream.prepare(
                 prompt=params['prompt'],
                 negative_prompt=DEFAULT_NEGATIVE_PROMPT,
                 num_inference_steps=50,
                 guidance_scale=params['guidance_scale'],
             )
+            # Actualizar nuestro registro
+            self.current_prompt = params['prompt']
+            self.current_guidance = params['guidance_scale']
+        
+        input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
+        noise = torch.randn_like(input_tensor) * 0.02
+        input_tensor = torch.clamp(input_tensor + noise, 0, 1)
+
         latents = self.stream.encode_image(input_tensor)
         noisy_latents = self.stream.add_noise(latents, params['strength'])
         denoised_latents = self.stream(image_latents=noisy_latents)
@@ -131,12 +138,10 @@ processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
-    # Asume que tu script original con el HTML está en el directorio
     try:
         from server_dotsimulate_enhanced import HTML_CONTENT
         return HTMLResponse(content=HTML_CONTENT)
     except ImportError:
-        # Fallback por si el archivo no existe
         return HTMLResponse(content="<h1>StreamDiffusion Server</h1><p>Ready to connect via WebSocket.</p>")
 
 @app.websocket("/ws")
