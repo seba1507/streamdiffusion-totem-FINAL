@@ -8,47 +8,43 @@ import base64
 from pathlib import Path
 
 # --- CONFIGURACIÓN DE ALTO RENDIMIENTO (Ajustable) ---
-
-# Modelo LCM optimizado para velocidad y calidad. Es el mejor punto de partida.
 MODEL_ID = "SimianLuo/LCM_Dreamshaper_v7"
-# El VAE (decodificador) es un cuello de botella. Usar un TinyVAE es CRÍTICO para FPS altos.
 TINY_VAE_ID = "madebyollin/taesd"
-
-# Directorio para guardar los motores TensorRT compilados. Acelera los reinicios.
 ENGINE_DIR = Path("./tensorrt_engines")
 ENGINE_DIR.mkdir(exist_ok=True)
-
-# Parámetros por defecto (el cliente puede sobreescribirlos)
-# Calidad vs Velocidad: "8k, masterpiece" da más detalle a costa de ~5% de rendimiento.
 DEFAULT_PROMPT = "cinematic, professional photography, highly detailed, sharp focus, 8k"
 DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, jpeg artifacts, ugly, deformed"
-# Los modelos LCM funcionan mejor con valores de Guidance bajos. 1.0-2.0 es el rango ideal.
 DEFAULT_GUIDANCE_SCALE = 1.2
-# Strength < 0.7 para cambios sutiles, > 0.7 para transformaciones intensas.
 DEFAULT_STRENGTH = 0.65
-# Suaviza el parpadeo entre frames. 0.0 es sin suavizado, 0.5 es muy suave.
 DEFAULT_TEMPORAL_SMOOTHING = 0.2
-
-# Resolución de la generación. 512 es el estándar para SD 1.5 y el más rápido.
 WIDTH, HEIGHT = 512, 512
 # ---------------------------------------------------------
 
-# Configurar y verificar CUDA
+# --- INICIO CORRECTO DE PYTORCH Y CUDA ---
+
+# 1. Importar torch ANTES de usarlo.
+import torch
+
+# 2. Configurar el entorno y verificar la disponibilidad de CUDA.
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 if not torch.cuda.is_available():
     print("FATAL: CUDA no está disponible. Revisa los drivers de NVIDIA y PyTorch.", file=sys.stderr)
     sys.exit(1)
+
+# 3. Ahora que 'torch' está importado y CUDA verificado, definir las variables dependientes.
 device = torch.device("cuda")
 dtype = torch.float16
 print(f"✅ CUDA detectado: {torch.cuda.get_device_name(0)} | Usando precisión: {dtype}")
 
-# Importaciones tardías de IA para asegurar que CUDA está configurado
+# 4. Importar el resto de librerías pesadas.
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
 from streamdiffusion.acceleration.tensorrt import accelerate_with_tensorrt
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from PIL import Image
+
+# -----------------------------------------------
 
 class StreamProcessor:
     """
@@ -115,12 +111,10 @@ class StreamProcessor:
         input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
         
         # 2. INYECCIÓN DE RUIDO EN GPU (Técnica de DotSimulate)
-        # Añade textura para que el modelo genere resultados más ricos y menos planos.
         noise = torch.randn_like(input_tensor) * 0.02
         input_tensor = torch.clamp(input_tensor + noise, 0, 1)
 
         # 3. ACTUALIZACIÓN DE PARÁMETROS (si es necesario)
-        # Esto permite cambiar el prompt o la guía en tiempo real sin reiniciar.
         if self.stream.prompt != params['prompt'] or self.stream.guidance_scale != params['guidance_scale']:
             self.stream.prepare(
                 prompt=params['prompt'],
@@ -130,23 +124,17 @@ class StreamProcessor:
             )
 
         # 4. INFERENCIA
-        # Convierte la imagen de entrada a espacio latente.
         latents = self.stream.encode_image(input_tensor)
-        # Añade ruido inicial basado en la intensidad (strength).
         noisy_latents = self.stream.add_noise(latents, params['strength'])
-        # Ejecuta el modelo (UNet) para "denoisar" los latentes.
         denoised_latents = self.stream(image_latents=noisy_latents)
 
         # 5. FEEDBACK TEMPORAL EN GPU (Técnica de DotSimulate)
-        # Interpola entre el último frame y el actual para suavizar la transición.
         if self.last_latents is not None:
              denoised_latents = torch.lerp(self.last_latents, denoised_latents, 1.0 - params['temporal_smoothing'])
-        self.last_latents = denoised_latents.clone() # Guardar el estado actual para el siguiente frame
+        self.last_latents = denoised_latents.clone()
 
         # 6. DECODIFICACIÓN Y POSTPROCESAMIENTO
-        # Convierte los latentes de vuelta a una imagen visible usando el TinyVAE.
         output_tensor = self.stream.decode_image(denoised_latents)
-        # Convierte el tensor de PyTorch a una imagen PIL.
         output_image = postprocess_image(output_tensor, output_type="pil")[0]
         
         # 7. MÉTRICAS DE RENDIMIENTO
@@ -162,18 +150,16 @@ class StreamProcessor:
 # --- SERVIDOR WEB FASTAPI ---
 
 app = FastAPI()
-# Es importante instanciar el procesador aquí para que el modelo se cargue al iniciar el servidor.
 processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
-    # Para no duplicar código, importamos el HTML del script original que ya tenías.
-    # Asegúrate de que el archivo 'server_dotsimulate_enhanced.py' esté en el mismo directorio.
+    # Asegúrate de que el archivo 'server_dotsimulate_enhanced.py' con el HTML exista.
     try:
         from server_dotsimulate_enhanced import HTML_CONTENT
         return HTMLResponse(content=HTML_CONTENT)
     except ImportError:
-        return HTMLResponse(content="<h1>Error</h1><p>No se pudo encontrar el archivo 'server_dotsimulate_enhanced.py' para cargar la interfaz.</p>")
+        return HTMLResponse(content="<h1>Error</h1><p>No se pudo encontrar 'server_dotsimulate_enhanced.py' para cargar la interfaz.</p><p>Por favor, asegúrate de que ese archivo esté en el mismo directorio.</p>")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -182,25 +168,19 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            
-            # Decodificar imagen de entrada
             img_data = base64.b64decode(data['image'].split(',')[1])
             input_image = Image.open(io.BytesIO(img_data)).convert("RGB")
             
-            # Recoger parámetros del cliente o usar los defaults
             params = {
                 'prompt': data.get('prompt', DEFAULT_PROMPT),
                 'strength': float(data.get('strength', DEFAULT_STRENGTH)),
                 'guidance_scale': float(data.get('guidance_scale', DEFAULT_GUIDANCE_SCALE)),
                 'temporal_smoothing': DEFAULT_TEMPORAL_SMOOTHING,
             }
-
-            # Procesar el frame con nuestra clase optimizada
             output_image, stats = processor.process_frame(input_image, params)
             
-            # Enviar el resultado de vuelta
             buffered = io.BytesIO()
-            output_image.save(buffered, format="JPEG", quality=90) # JPEG quality 90 es buen balance
+            output_image.save(buffered, format="JPEG", quality=90)
             img_str = base64.b64encode(buffered.getvalue()).decode()
             
             await websocket.send_json({'image': f'data:image/jpeg;base64,{img_str}', 'stats': stats})
@@ -208,7 +188,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"❌ Error en WebSocket: {e}", file=sys.stderr)
     finally:
-        processor.last_latents = None # Limpiar estado al desconectar
+        processor.last_latents = None
         print("🔌 Cliente desconectado.")
 
 if __name__ == "__main__":
