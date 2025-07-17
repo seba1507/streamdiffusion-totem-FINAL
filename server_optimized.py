@@ -102,15 +102,18 @@ class OptimizedStreamDiffusion:
         print("Pre-calentando pipeline...")
         dummy_image = Image.new('RGB', (512, 512), color=(128, 128, 128))
         
-        with torch.no_grad():
-            with torch.cuda.amp.autocast():
-                _ = self.pipe(
-                    "test",
-                    image=dummy_image,
-                    num_inference_steps=1,
-                    strength=0.5,
-                    guidance_scale=0.0
-                ).images[0]
+        try:
+            with torch.no_grad():
+                with torch.cuda.amp.autocast():
+                    _ = self.pipe(
+                        "test",
+                        image=dummy_image,
+                        num_inference_steps=1,
+                        strength=0.5,
+                        guidance_scale=1.0  # SD-Turbo necesita al menos 1.0
+                    ).images[0]
+        except Exception as e:
+            print(f"⚠ Pre-calentamiento falló, continuando: {e}")
         
         print("✓ Optimized StreamDiffusion listo!")
         self.start_processing_thread()
@@ -136,7 +139,7 @@ class OptimizedStreamDiffusion:
                             image=frame_data['image'],
                             num_inference_steps=1,  # Solo 1 paso!
                             strength=frame_data.get('strength', 0.5),
-                            guidance_scale=0.0,  # Sin guidance para máxima velocidad
+                            guidance_scale=1.0,  # SD-Turbo mínimo 1.0
                             generator=torch.Generator(device=self.device).manual_seed(42)
                         ).images[0]
                 
