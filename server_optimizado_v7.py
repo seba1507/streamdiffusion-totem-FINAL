@@ -1,3 +1,4 @@
+cat << 'EOF' > server_optimizado.py
 #!/usr/bin/env python3
 import os
 import sys
@@ -138,10 +139,12 @@ processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
+    # Asume que tu script original con el HTML está en el directorio
     try:
         from server_dotsimulate_enhanced import HTML_CONTENT
         return HTMLResponse(content=HTML_CONTENT)
     except ImportError:
+        # Fallback por si el archivo no existe
         return HTMLResponse(content="<h1>StreamDiffusion Server</h1><p>Ready to connect via WebSocket.</p>")
 
 @app.websocket("/ws")
@@ -183,3 +186,4 @@ if __name__ == "__main__":
     print(f"🌐 Servidor en:      http://0.0.0.0:8000")
     print("="*80 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+EOF
