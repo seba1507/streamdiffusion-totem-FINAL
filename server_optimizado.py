@@ -54,7 +54,7 @@ class StreamProcessor:
         
         # --- NUEVO MÉTODO DE INICIALIZACIÓN ---
         print(f"--> Cargando modelo '{MODEL_ID}' con diffusers...")
-        # LA ÚNICA LÍNEA CORREGIDA: Se ha eliminado `variant="fp16"`
+        # LÍNEA CORREGIDA: Se ha eliminado `variant="fp16"`
         pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype)
         pipe.to(device=device)
 
