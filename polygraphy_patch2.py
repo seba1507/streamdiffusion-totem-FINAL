@@ -20,31 +20,53 @@ def get_bindings_per_profile(engine):
 trt_util.get_bindings_per_profile = get_bindings_per_profile
 
 # Parche para métodos deprecados de ICudaEngine
-original_cuda_engine = trt.ICudaEngine
-
 class PatchedCudaEngine:
     def __init__(self, engine):
         self._engine = engine
-        # Copiar todos los atributos del engine original
-        for attr in dir(engine):
-            if not attr.startswith('_') and not hasattr(self, attr):
-                try:
-                    setattr(self, attr, getattr(engine, attr))
-                except:
-                    pass
-    
+        
     def __getattr__(self, name):
-        # Si el atributo no existe, intentar obtenerlo del engine original
+        # Primero buscar en el engine original
         return getattr(self._engine, name)
+    
+    def __getitem__(self, key):
+        """Hacer el objeto subscriptable"""
+        return self._engine[key]
+    
+    def __setitem__(self, key, value):
+        """Permitir asignación por índice"""
+        self._engine[key] = value
+    
+    @property
+    def num_bindings(self):
+        """Propiedad para compatibilidad"""
+        if hasattr(self._engine, 'num_bindings'):
+            return self._engine.num_bindings
+        elif hasattr(self._engine, 'num_io_tensors'):
+            return self._engine.num_io_tensors
+        else:
+            return 0
+    
+    @property
+    def num_optimization_profiles(self):
+        """Propiedad para compatibilidad"""
+        if hasattr(self._engine, 'num_optimization_profiles'):
+            return self._engine.num_optimization_profiles
+        else:
+            return 1
     
     def get_binding_dtype(self, index):
         """Compatibilidad para TensorRT 10.x"""
         if hasattr(self._engine, 'get_binding_dtype'):
             return self._engine.get_binding_dtype(index)
         elif hasattr(self._engine, 'get_tensor_dtype'):
-            # TensorRT 10.x usa get_tensor_dtype
-            binding_name = self.get_tensor_name(index) if hasattr(self, 'get_tensor_name') else self.get_binding_name(index)
-            return self._engine.get_tensor_dtype(binding_name)
+            # TensorRT 10.x usa get_tensor_dtype con nombres
+            if hasattr(self._engine, 'get_tensor_name'):
+                tensor_name = self._engine.get_tensor_name(index)
+            elif hasattr(self._engine, 'get_binding_name'):
+                tensor_name = self._engine.get_binding_name(index)
+            else:
+                tensor_name = f"binding_{index}"
+            return self._engine.get_tensor_dtype(tensor_name)
         else:
             # Fallback - asumir float16
             return trt.DataType.HALF
@@ -54,9 +76,14 @@ class PatchedCudaEngine:
         if hasattr(self._engine, 'get_binding_shape'):
             return self._engine.get_binding_shape(index)
         elif hasattr(self._engine, 'get_tensor_shape'):
-            # TensorRT 10.x usa get_tensor_shape
-            binding_name = self.get_tensor_name(index) if hasattr(self, 'get_tensor_name') else self.get_binding_name(index)
-            return self._engine.get_tensor_shape(binding_name)
+            # TensorRT 10.x usa get_tensor_shape con nombres
+            if hasattr(self._engine, 'get_tensor_name'):
+                tensor_name = self._engine.get_tensor_name(index)
+            elif hasattr(self._engine, 'get_binding_name'):
+                tensor_name = self._engine.get_binding_name(index)
+            else:
+                tensor_name = f"binding_{index}"
+            return self._engine.get_tensor_shape(tensor_name)
         else:
             return []
     
@@ -74,10 +101,18 @@ class PatchedCudaEngine:
         if hasattr(self._engine, 'binding_is_input'):
             return self._engine.binding_is_input(index)
         elif hasattr(self._engine, 'get_tensor_mode'):
-            binding_name = self.get_tensor_name(index) if hasattr(self, 'get_tensor_name') else self.get_binding_name(index)
-            return self._engine.get_tensor_mode(binding_name) == trt.TensorIOMode.INPUT
+            # TensorRT 10.x
+            if hasattr(self._engine, 'get_tensor_name'):
+                tensor_name = self._engine.get_tensor_name(index)
+            elif hasattr(self._engine, 'get_binding_name'):
+                tensor_name = self._engine.get_binding_name(index)
+            else:
+                tensor_name = f"binding_{index}"
+            mode = self._engine.get_tensor_mode(tensor_name)
+            return mode == trt.TensorIOMode.INPUT
         else:
-            return index == 0  # Asumir que el primer binding es input
+            # Fallback
+            return index == 0
 
 # Monkey patch para interceptar la creación de engines
 original_deserialize = trt.Runtime.deserialize_cuda_engine
