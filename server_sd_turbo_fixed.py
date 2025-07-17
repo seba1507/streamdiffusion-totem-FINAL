@@ -157,6 +157,7 @@ class WorkingSDTurbo:
             try:
                 start = time.time()
                 task = self.current_task
+                diff_from_input = 0  # Inicializar para logging
                 
                 # Preparar imagen
                 image = task['image']
@@ -167,14 +168,23 @@ class WorkingSDTurbo:
                 if image.mode != 'RGB':
                     image = image.convert('RGB')
                 
-                # Prompt simple para SD-Turbo
+                # Debug: verificar que tenemos imagen válida
+                # img_array = np.array(image)
+                # img_mean = img_array.mean()
+                # print(f"📷 Input image: size={image.size}, mean_pixel={img_mean:.1f}")
+                
+                # Prompt para transformación de estilo (no generación completa)
                 prompt = task.get('prompt', '').strip()
                 if not prompt:
-                    prompt = "a photo"
+                    prompt = "artistic style photo"
                 
-                # Parámetros seguros
-                strength = float(task.get('strength', 0.7))  # Default más alto
-                strength = max(0.4, min(0.95, strength))  # Mínimo 0.4 para más cambio
+                # Agregar contexto de imagen para mejor preservación
+                if "style" not in prompt.lower():
+                    prompt = prompt + " style"
+                
+                # Parámetros seguros - BALANCE para mantener la imagen original
+                strength = float(task.get('strength', 0.35))  # Más bajo para preservar input
+                strength = max(0.2, min(0.5, strength))  # Rango 0.2-0.5 para mejor balance
                 
                 # Para debugging
                 # print(f"📸 Procesando frame con strength={strength:.2f}, prompt='{prompt[:30]}'...")
@@ -211,8 +221,18 @@ class WorkingSDTurbo:
                 if result is None:
                     result = image
                 
-                # Verificar si el resultado es idéntico al anterior
+                # Verificar si el resultado es muy diferente del input
                 result_array = np.array(result)
+                input_array = np.array(image)
+                
+                # Calcular diferencia con input
+                diff_from_input = np.abs(result_array.astype(float) - input_array.astype(float)).mean()
+                
+                if diff_from_input > 100:  # Si es muy diferente del input
+                    print(f"⚠️  Resultado muy diferente del input (diff={diff_from_input:.1f})")
+                    print(f"    Considera reducir strength a 0.2-0.3")
+                
+                # Hash para detectar resultados idénticos
                 result_hash = hash(result_array.tobytes())
                 
                 if self.last_result_hash and result_hash == self.last_result_hash:
@@ -245,12 +265,13 @@ class WorkingSDTurbo:
                     }
                 }
                 
-                print(f"✓ Frame: {elapsed:.0f}ms (seed: {seed}, strength: {strength:.2f})")
+                print(f"✓ Frame {self.processed_frames}: {elapsed:.0f}ms (strength: {strength:.2f}, diff: {diff_from_input:.1f})")
                 
             except Exception as e:
                 print(f"❌ Error general: {type(e).__name__}: {e}")
                 # Crear resultado dummy en caso de error
                 dummy_img = Image.new('RGB', (512, 512), (128, 0, 128))
+                diff_from_input = 0  # Valor por defecto para el log
                 self.last_result = {
                     'image': dummy_img,
                     'time': 0,
@@ -263,8 +284,8 @@ class WorkingSDTurbo:
             
             self.current_task = None
             
-            # Clean cache más frecuentemente
-            if self.processed_frames % 10 == 0:
+            # Clean cache menos frecuentemente para no interrumpir
+            if self.processed_frames % 20 == 0:
                 torch.cuda.empty_cache()
                 print("🧹 Cache limpiado")
     
@@ -570,13 +591,13 @@ HTML_CONTENT = """
         
         <div class="control-group">
             <div class="control-label">Custom Prompt</div>
-            <textarea id="customPrompt" placeholder="Simple prompts work best with SD-Turbo">cyberpunk portrait</textarea>
+            <textarea id="customPrompt" placeholder="Style prompts work best: 'anime style', 'oil painting', 'cyberpunk style'">anime style portrait</textarea>
         </div>
         
         <div class="control-group">
-            <div class="control-label">Strength: <span id="strengthValue">0.7</span></div>
-            <input type="range" id="strengthSlider" min="0.4" max="0.95" step="0.05" value="0.7" oninput="updateStrengthValue()">
-            <div style="color: #999; font-size: 11px; margin-top: 5px;">⚡ Higher = More transformation</div>
+            <div class="control-label">Strength: <span id="strengthValue">0.35</span></div>
+            <input type="range" id="strengthSlider" min="0.15" max="0.5" step="0.05" value="0.35" oninput="updateStrengthValue()">
+            <div style="color: #999; font-size: 11px; margin-top: 5px;">⚡ 0.15-0.3 = Preserva persona | 0.3-0.5 = Más transformación</div>
         </div>
     </div>
     
@@ -764,7 +785,7 @@ async def websocket_endpoint(websocket: WebSocket):
             processor.add_frame(
                 image,
                 data.get('prompt', ''),
-                data.get('strength', 0.7)  # Default más alto
+                data.get('strength', 0.35)  # Default balanceado
             )
             
             result = processor.get_result()
@@ -788,11 +809,11 @@ if __name__ == "__main__":
     import uvicorn
     
     print("="*80)
-    print("🚀 SD-TURBO FIXED - A6000 OPTIMIZED")
+    print("🚀 SD-TURBO FIXED - IMAGE-TO-IMAGE MODE")
     print("="*80)
-    print("⚡ SD-Turbo con fallback a LCM si falla")
-    print("🛡️ Manejo robusto de errores")
-    print("🎯 WebSocket seguro (wss://)")
+    print("⚡ Optimizado para preservar la imagen de entrada")
+    print("🎯 Strength: 0.15-0.5 (más bajo = más preservación)")
+    print("📸 Prompts de estilo: 'anime style', 'oil painting', etc.")
     print("📺 Totem Mode incluido")
     print("🌐 http://0.0.0.0:8000")
     print("="*80)
