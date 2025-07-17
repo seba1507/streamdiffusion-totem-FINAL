@@ -370,7 +370,7 @@ HTML_CONTENT = """
                 
                 await new Promise(r => video.onloadedmetadata = r);
                 
-                ws = new WebSocket(`ws://${window.location.host}/ws`);
+                ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`);
                 
                 ws.onopen = () => {
                     streaming = true;
