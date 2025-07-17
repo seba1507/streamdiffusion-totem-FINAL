@@ -5,7 +5,7 @@ import time
 import threading
 import queue
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 # Configurar CUDA
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -50,11 +50,13 @@ class WorkingSDTurbo:
         # Threading
         self.current_task = None
         self.last_result = None
+        self.last_result_hash = None  # Para detectar resultados idénticos
         self.processing = False
         
         # Counters
         self.total_frames = 0
         self.processed_frames = 0
+        self.identical_results = 0
         
         self.init_model()
         
@@ -171,11 +173,16 @@ class WorkingSDTurbo:
                     prompt = "a photo"
                 
                 # Parámetros seguros
-                strength = float(task.get('strength', 0.5))
-                strength = max(0.1, min(0.9, strength))  # Clamp entre 0.1 y 0.9
+                strength = float(task.get('strength', 0.7))  # Default más alto
+                strength = max(0.4, min(0.95, strength))  # Mínimo 0.4 para más cambio
+                
+                # Para debugging
+                # print(f"📸 Procesando frame con strength={strength:.2f}, prompt='{prompt[:30]}'...")
                 
                 # Generar con manejo de errores robusto
                 result = None
+                seed = int(time.time() * 1000) % 100000  # Seed variable
+                
                 with torch.no_grad():
                     try:
                         output = self.pipe(
@@ -184,7 +191,7 @@ class WorkingSDTurbo:
                             num_inference_steps=1,
                             strength=strength,
                             guidance_scale=0.0,
-                            generator=torch.Generator(device=self.device).manual_seed(42),
+                            generator=torch.Generator(device=self.device).manual_seed(seed),
                             output_type="pil",
                             return_dict=True
                         )
@@ -204,6 +211,26 @@ class WorkingSDTurbo:
                 if result is None:
                     result = image
                 
+                # Verificar si el resultado es idéntico al anterior
+                result_array = np.array(result)
+                result_hash = hash(result_array.tobytes())
+                
+                if self.last_result_hash and result_hash == self.last_result_hash:
+                    self.identical_results += 1
+                    print(f"⚠️  Resultado idéntico detectado ({self.identical_results} veces)")
+                    
+                    # Si hay muchos resultados idénticos, aumentar strength
+                    if self.identical_results > 3:
+                        print("🔄 Forzando más variación...")
+                        # Aplicar transformación adicional a la imagen
+                        enhancer = ImageEnhance.Color(result)
+                        result = enhancer.enhance(1.0 + (np.random.random() - 0.5) * 0.2)
+                        self.identical_results = 0
+                else:
+                    self.identical_results = 0
+                
+                self.last_result_hash = result_hash
+                
                 # Save result
                 elapsed = (time.time() - start) * 1000
                 self.processed_frames += 1
@@ -218,7 +245,7 @@ class WorkingSDTurbo:
                     }
                 }
                 
-                print(f"✓ Frame: {elapsed:.0f}ms (strength: {strength:.2f})")
+                print(f"✓ Frame: {elapsed:.0f}ms (seed: {seed}, strength: {strength:.2f})")
                 
             except Exception as e:
                 print(f"❌ Error general: {type(e).__name__}: {e}")
@@ -236,13 +263,15 @@ class WorkingSDTurbo:
             
             self.current_task = None
             
-            # Clean cache
-            if self.processed_frames % 30 == 0:
+            # Clean cache más frecuentemente
+            if self.processed_frames % 10 == 0:
                 torch.cuda.empty_cache()
+                print("🧹 Cache limpiado")
     
     def add_frame(self, image, prompt, strength):
         self.total_frames += 1
         
+        # NO skip frames - procesar todos para más variación
         if self.current_task is not None:
             return
         
@@ -545,8 +574,9 @@ HTML_CONTENT = """
         </div>
         
         <div class="control-group">
-            <div class="control-label">Strength: <span id="strengthValue">0.5</span></div>
-            <input type="range" id="strengthSlider" min="0.3" max="0.8" step="0.05" value="0.5" oninput="updateStrengthValue()">
+            <div class="control-label">Strength: <span id="strengthValue">0.7</span></div>
+            <input type="range" id="strengthSlider" min="0.4" max="0.95" step="0.05" value="0.7" oninput="updateStrengthValue()">
+            <div style="color: #999; font-size: 11px; margin-top: 5px;">⚡ Higher = More transformation</div>
         </div>
     </div>
     
@@ -656,7 +686,7 @@ HTML_CONTENT = """
                 strength: parseFloat(document.getElementById('strengthSlider').value)
             }));
             
-            setTimeout(sendFrame, 50); // 20 FPS
+            setTimeout(sendFrame, 100); // 10 FPS para menos skip
         }
         
         function updateStats(data) {
@@ -734,7 +764,7 @@ async def websocket_endpoint(websocket: WebSocket):
             processor.add_frame(
                 image,
                 data.get('prompt', ''),
-                data.get('strength', 0.5)
+                data.get('strength', 0.7)  # Default más alto
             )
             
             result = processor.get_result()
