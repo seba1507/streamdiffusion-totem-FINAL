@@ -1,3 +1,4 @@
+cat << 'EOF' > server_optimizado.py
 #!/usr/bin/env python3
 import os
 import sys
@@ -32,7 +33,7 @@ dtype = torch.float16
 print(f"✅ CUDA detectado: {torch.cuda.get_device_name(0)} | Usando precisión: {dtype}")
 
 # --- Importaciones de Librerías de IA ---
-from diffusers import AutoPipelineForImage2Image, LCMScheduler
+from diffusers import AutoPipelineForImage2Image, AutoencoderTiny
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
 from streamdiffusion.acceleration.tensorrt import accelerate_with_tensorrt
@@ -52,10 +53,13 @@ class StreamProcessor:
     def _initialize_pipeline(self) -> StreamDiffusion:
         print("🚀 Inicializando pipeline... (Este es el paso final)")
         
-        # --- NUEVO MÉTODO DE INICIALIZACIÓN ---
+        # --- MÉTODO DE INICIALIZACIÓN FINAL Y CORRECTO ---
         print(f"--> Cargando modelo '{MODEL_ID}' con diffusers...")
-        # LÍNEA CORREGIDA: Se ha eliminado `variant="fp16"`
         pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype)
+        
+        # Cargar y reemplazar el VAE con la versión Tiny para máxima velocidad.
+        print(f"--> Cargando TinyVAE '{TINY_VAE_ID}'...")
+        pipe.vae = AutoencoderTiny.from_pretrained(TINY_VAE_ID, torch_dtype=dtype)
         pipe.to(device=device)
 
         print("--> Configurando StreamDiffusion...")
@@ -65,8 +69,8 @@ class StreamProcessor:
             frame_buffer_size=1,
             width=WIDTH,
             height=HEIGHT,
-            use_tiny_vae=TINY_VAE_ID,
         )
+        # ----------------------------------------------------
 
         print(f"--> Cargando y fusionando LoRA LCM...")
         stream.load_lcm_lora()
@@ -128,11 +132,13 @@ processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
+    # Asume que tu script original con el HTML está en el directorio
     try:
         from server_dotsimulate_enhanced import HTML_CONTENT
         return HTMLResponse(content=HTML_CONTENT)
     except ImportError:
-        return HTMLResponse(content="<h1>Error</h1><p>No se pudo encontrar 'server_dotsimulate_enhanced.py' para cargar la interfaz.</p>")
+        # Fallback por si el archivo no existe
+        return HTMLResponse(content="<h1>StreamDiffusion Server</h1><p>Ready to connect via WebSocket.</p>")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -173,3 +179,4 @@ if __name__ == "__main__":
     print(f"🌐 Servidor en:      http://0.0.0.0:8000")
     print("="*80 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+EOF
