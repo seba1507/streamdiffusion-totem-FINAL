@@ -1,4 +1,3 @@
-cat << 'EOF' > server_optimizado.py
 #!/usr/bin/env python3
 import os
 import sys
@@ -179,4 +178,3 @@ if __name__ == "__main__":
     print(f"🌐 Servidor en:      http://0.0.0.0:8000")
     print("="*80 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
-EOF
