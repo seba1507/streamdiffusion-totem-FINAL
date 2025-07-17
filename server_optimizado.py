@@ -47,26 +47,18 @@ from PIL import Image
 # -----------------------------------------------
 
 class StreamProcessor:
-    """
-    Clase que encapsula toda la lógica de StreamDiffusion, desde la carga del modelo
-    hasta el procesamiento de frames en tiempo real, todo acelerado en la GPU.
-    """
     def __init__(self):
         self.stream = self._initialize_pipeline()
         self.last_latents = None
-        self.frame_times = [] # Para calcular FPS promedio
+        self.frame_times = []
         print("✅ Procesador de Stream optimizado y listo.")
 
     def _initialize_pipeline(self) -> StreamDiffusion:
-        """
-        Carga el modelo, lo acelera con TensorRT y lo pre-calienta para un rendimiento
-        inmediato. La primera ejecución compilará los motores, lo cual puede tardar.
-        """
         print("🚀 Inicializando pipeline de StreamDiffusion...")
         
         stream = StreamDiffusion(
             model_id_or_path=MODEL_ID,
-            t_index_list=[0, 16, 32, 45], # Timesteps como en la doc de DotSimulate para img2img
+            t_index_list=[0, 16, 32, 45],
             frame_buffer_size=1,
             width=WIDTH,
             height=HEIGHT,
@@ -88,13 +80,12 @@ class StreamProcessor:
             print("✅ Pipeline acelerado con TensorRT exitosamente.")
         except Exception as e:
             print(f"⚠️ Advertencia: Falló la aceleración con TensorRT. {e}", file=sys.stderr)
-            print("El rendimiento será significativamente menor. Revisa la instalación de TensorRT.", file=sys.stderr)
 
         print("🔥 Pre-calentando el pipeline...")
         stream.prepare(
             prompt=DEFAULT_PROMPT,
             negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            num_inference_steps=50, # El scheduler LCM ignora esto, pero es bueno tenerlo.
+            num_inference_steps=50,
             guidance_scale=DEFAULT_GUIDANCE_SCALE,
         )
         print("✅ Pipeline listo para recibir frames.")
@@ -102,19 +93,11 @@ class StreamProcessor:
 
     @torch.no_grad()
     def process_frame(self, image: Image.Image, params: dict) -> (Image.Image, dict):
-        """
-        Procesa un único frame. Todas las operaciones se realizan en la GPU.
-        """
         start_time = time.time()
-        
-        # 1. PREPROCESAMIENTO EN GPU
         input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
-        
-        # 2. INYECCIÓN DE RUIDO EN GPU (Técnica de DotSimulate)
         noise = torch.randn_like(input_tensor) * 0.02
         input_tensor = torch.clamp(input_tensor + noise, 0, 1)
 
-        # 3. ACTUALIZACIÓN DE PARÁMETROS (si es necesario)
         if self.stream.prompt != params['prompt'] or self.stream.guidance_scale != params['guidance_scale']:
             self.stream.prepare(
                 prompt=params['prompt'],
@@ -122,44 +105,35 @@ class StreamProcessor:
                 num_inference_steps=50,
                 guidance_scale=params['guidance_scale'],
             )
-
-        # 4. INFERENCIA
         latents = self.stream.encode_image(input_tensor)
         noisy_latents = self.stream.add_noise(latents, params['strength'])
         denoised_latents = self.stream(image_latents=noisy_latents)
 
-        # 5. FEEDBACK TEMPORAL EN GPU (Técnica de DotSimulate)
         if self.last_latents is not None:
              denoised_latents = torch.lerp(self.last_latents, denoised_latents, 1.0 - params['temporal_smoothing'])
         self.last_latents = denoised_latents.clone()
 
-        # 6. DECODIFICACIÓN Y POSTPROCESAMIENTO
         output_tensor = self.stream.decode_image(denoised_latents)
         output_image = postprocess_image(output_tensor, output_type="pil")[0]
         
-        # 7. MÉTRICAS DE RENDIMIENTO
         processing_time_ms = (time.time() - start_time) * 1000
         self.frame_times.append(processing_time_ms)
         if len(self.frame_times) > 100: self.frame_times.pop(0)
         avg_latency = sum(self.frame_times) / len(self.frame_times)
         fps = 1000 / avg_latency if avg_latency > 0 else 0
-        
         stats = {"fps": round(fps, 1), "latency": round(processing_time_ms, 1)}
         return output_image, stats
-
-# --- SERVIDOR WEB FASTAPI ---
 
 app = FastAPI()
 processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
-    # Asegúrate de que el archivo 'server_dotsimulate_enhanced.py' con el HTML exista.
     try:
         from server_dotsimulate_enhanced import HTML_CONTENT
         return HTMLResponse(content=HTML_CONTENT)
     except ImportError:
-        return HTMLResponse(content="<h1>Error</h1><p>No se pudo encontrar 'server_dotsimulate_enhanced.py' para cargar la interfaz.</p><p>Por favor, asegúrate de que ese archivo esté en el mismo directorio.</p>")
+        return HTMLResponse(content="<h1>Error</h1><p>No se pudo encontrar 'server_dotsimulate_enhanced.py' para cargar la interfaz.</p>")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -170,7 +144,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             img_data = base64.b64decode(data['image'].split(',')[1])
             input_image = Image.open(io.BytesIO(img_data)).convert("RGB")
-            
             params = {
                 'prompt': data.get('prompt', DEFAULT_PROMPT),
                 'strength': float(data.get('strength', DEFAULT_STRENGTH)),
@@ -178,13 +151,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 'temporal_smoothing': DEFAULT_TEMPORAL_SMOOTHING,
             }
             output_image, stats = processor.process_frame(input_image, params)
-            
             buffered = io.BytesIO()
             output_image.save(buffered, format="JPEG", quality=90)
             img_str = base64.b64encode(buffered.getvalue()).decode()
-            
             await websocket.send_json({'image': f'data:image/jpeg;base64,{img_str}', 'stats': stats})
-            
     except Exception as e:
         print(f"❌ Error en WebSocket: {e}", file=sys.stderr)
     finally:
@@ -203,5 +173,4 @@ if __name__ == "__main__":
     print(f"🎯 Rendimiento L40S: ~40-60 FPS @ {WIDTH}x{HEIGHT}")
     print(f"🌐 Servidor en:      http://0.0.0.0:8000")
     print("="*80 + "\n")
-    
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
