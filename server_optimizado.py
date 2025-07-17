@@ -53,12 +53,11 @@ class StreamProcessor:
         print("🚀 Inicializando pipeline... (Este es el paso final)")
         
         # --- NUEVO MÉTODO DE INICIALIZACIÓN ---
-        # 1. Cargar el modelo base con diffusers
         print(f"--> Cargando modelo '{MODEL_ID}' con diffusers...")
-        pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype, variant="fp16")
+        # LA ÚNICA LÍNEA CORREGIDA: Se ha eliminado `variant="fp16"`
+        pipe = AutoPipelineForImage2Image.from_pretrained(MODEL_ID, torch_dtype=dtype)
         pipe.to(device=device)
 
-        # 2. Inicializar StreamDiffusion pasándole el pipeline ya cargado
         print("--> Configurando StreamDiffusion...")
         stream = StreamDiffusion(
             pipe=pipe,
@@ -68,7 +67,6 @@ class StreamProcessor:
             height=HEIGHT,
             use_tiny_vae=TINY_VAE_ID,
         )
-        # ------------------------------------------
 
         print(f"--> Cargando y fusionando LoRA LCM...")
         stream.load_lcm_lora()
