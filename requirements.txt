@@ -1,11 +1,9 @@
+# requirements.txt (CORREGIDO)
+
 # PyTorch y CUDA (para L40S, CUDA 12.1 es ideal)
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch==2.3.0+cu121
 torchvision==0.18.0+cu121
-
-# Instala StreamDiffusion directamente desde el repositorio para obtener las últimas optimizaciones
-# La opción [tensorrt] instala todo lo necesario para la aceleración
-pip install git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion[tensorrt]
 
 # Dependencias adicionales que StreamDiffusion podría necesitar
 diffusers==0.27.2
@@ -19,5 +17,5 @@ fastapi==0.111.0
 uvicorn[standard]==0.29.0
 websockets==12.0
 
-# Mínimo de procesamiento de imagen para decodificar la entrada
+# Mínimo de procesamiento de imagen
 pillow==10.3.0
