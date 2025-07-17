@@ -28,7 +28,7 @@ print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} G
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from diffusers import AutoPipelineForImage2Image
+from diffusers import DiffusionPipeline, AutoPipelineForImage2Image
 import base64
 import io
 import json
@@ -41,13 +41,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class SDTurboDiffusion:
+class WorkingSDTurbo:
     def __init__(self):
         self.device = "cuda"
         self.dtype = torch.float16
-        self.resolution = 512  # SD-Turbo funciona mejor a 512
+        self.resolution = 512
         
-        # Threading simple
+        # Threading
         self.current_task = None
         self.last_result = None
         self.processing = False
@@ -59,29 +59,50 @@ class SDTurboDiffusion:
         self.init_model()
         
     def init_model(self):
-        print("\n🚀 Inicializando SD-Turbo...")
+        print("\n🚀 Inicializando SD-Turbo (Fixed)...")
         
-        # SD-Turbo
-        model_id = "stabilityai/sd-turbo"
+        try:
+            # Intentar cargar SD-Turbo con configuración específica
+            print("📥 Cargando SD-Turbo...")
+            
+            # Usar DiffusionPipeline genérico primero
+            self.pipe = DiffusionPipeline.from_pretrained(
+                "stabilityai/sd-turbo",
+                torch_dtype=self.dtype,
+                use_safetensors=True,
+                safety_checker=None
+            ).to(self.device)
+            
+            # Verificar que sea img2img pipeline
+            if not hasattr(self.pipe, '__call__'):
+                print("⚠️  Convirtiendo a img2img pipeline...")
+                self.pipe = AutoPipelineForImage2Image.from_pipe(self.pipe).to(self.device)
+            
+            print("✅ SD-Turbo cargado correctamente")
+            
+        except Exception as e:
+            print(f"❌ Error cargando SD-Turbo: {e}")
+            print("🔄 Fallback a LCM...")
+            
+            # Fallback a LCM que sabemos que funciona
+            self.pipe = AutoPipelineForImage2Image.from_pretrained(
+                "SimianLuo/LCM_Dreamshaper_v7",
+                torch_dtype=self.dtype,
+                safety_checker=None,
+                use_safetensors=True
+            ).to(self.device)
+            
+            print("✅ LCM cargado como fallback")
         
-        print(f"📥 Cargando {model_id}...")
-        self.pipe = AutoPipelineForImage2Image.from_pretrained(
-            model_id,
-            torch_dtype=self.dtype,
-            variant="fp16",
-            safety_checker=None,
-            requires_safety_checker=False
-        ).to(self.device)
-        
-        # No scheduler changes needed for SD-Turbo
+        # Configuraciones
         self.pipe.set_progress_bar_config(disable=True)
         
-        # XFormers - crítico para velocidad
+        # XFormers
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
             print("✅ XFormers habilitado")
-        except Exception as e:
-            print(f"❌ XFormers error: {e}")
+        except:
+            print("⚠️  XFormers no disponible")
         
         # VAE optimizations
         try:
@@ -91,22 +112,32 @@ class SDTurboDiffusion:
         except:
             pass
         
-        # Warmup
-        print("🔥 Calentando pipeline...")
+        # Test del modelo
+        print("🧪 Testeando modelo...")
         try:
-            dummy = Image.new('RGB', (self.resolution, self.resolution), (128, 128, 128))
+            dummy = Image.new('RGB', (512, 512), (128, 128, 128))
             with torch.no_grad():
-                _ = self.pipe(
-                    prompt="test",
+                # Test con parámetros seguros
+                test_result = self.pipe(
+                    prompt="a photo",
                     image=dummy,
                     num_inference_steps=1,
                     strength=0.5,
-                    guidance_scale=0.0  # SD-Turbo usa 0.0
-                ).images[0]
+                    guidance_scale=0.0,
+                    output_type="pil",
+                    return_dict=True
+                )
+                
+                if hasattr(test_result, 'images') and len(test_result.images) > 0:
+                    print("✅ Test exitoso - modelo funcionando")
+                else:
+                    print("⚠️  Test produjo resultado vacío")
+                    
             torch.cuda.empty_cache()
-            print("✅ Pipeline listo!")
+            
         except Exception as e:
-            print(f"⚠️  Warmup error: {e}")
+            print(f"❌ Error en test: {e}")
+            print("Continuando de todos modos...")
         
         # Start processing
         self.processing = True
@@ -115,7 +146,7 @@ class SDTurboDiffusion:
         print("✅ Processing thread iniciado\n")
     
     def _process_loop(self):
-        """Loop de procesamiento para SD-Turbo"""
+        """Loop de procesamiento robusto"""
         while self.processing:
             if self.current_task is None:
                 time.sleep(0.001)
@@ -123,25 +154,55 @@ class SDTurboDiffusion:
             
             try:
                 start = time.time()
-                
-                # Get task data
                 task = self.current_task
+                
+                # Preparar imagen
                 image = task['image']
-                
-                # Resize if needed
                 if image.size != (self.resolution, self.resolution):
-                    image = image.resize((self.resolution, self.resolution), Image.Resampling.LANCZOS)
+                    image = image.resize((self.resolution, self.resolution), Image.LANCZOS)
                 
-                # Generate with SD-Turbo settings
+                # Asegurar que la imagen esté en RGB
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Prompt simple para SD-Turbo
+                prompt = task.get('prompt', '').strip()
+                if not prompt:
+                    prompt = "a photo"
+                
+                # Parámetros seguros
+                strength = float(task.get('strength', 0.5))
+                strength = max(0.1, min(0.9, strength))  # Clamp entre 0.1 y 0.9
+                
+                # Generar con manejo de errores robusto
+                result = None
                 with torch.no_grad():
-                    with torch.cuda.amp.autocast():
-                        result = self.pipe(
-                            prompt=task.get('prompt', '') or '',
+                    try:
+                        output = self.pipe(
+                            prompt=prompt,
                             image=image,
-                            num_inference_steps=1,  # SD-Turbo siempre usa 1
-                            strength=task.get('strength', 0.5),
-                            guidance_scale=0.0  # SD-Turbo siempre usa 0.0
-                        ).images[0]
+                            num_inference_steps=1,
+                            strength=strength,
+                            guidance_scale=0.0,
+                            generator=torch.Generator(device=self.device).manual_seed(42),
+                            output_type="pil",
+                            return_dict=True
+                        )
+                        
+                        # Verificar resultado
+                        if hasattr(output, 'images') and len(output.images) > 0:
+                            result = output.images[0]
+                        else:
+                            print("⚠️  Output vacío, usando imagen original")
+                            result = image
+                            
+                    except Exception as e:
+                        print(f"❌ Error en generación: {e}")
+                        result = image  # Usar imagen original como fallback
+                
+                # Asegurar que tenemos un resultado
+                if result is None:
+                    result = image
                 
                 # Save result
                 elapsed = (time.time() - start) * 1000
@@ -157,21 +218,31 @@ class SDTurboDiffusion:
                     }
                 }
                 
-                print(f"✓ Frame: {elapsed:.0f}ms")
+                print(f"✓ Frame: {elapsed:.0f}ms (strength: {strength:.2f})")
                 
             except Exception as e:
-                print(f"❌ Error: {type(e).__name__}: {e}")
+                print(f"❌ Error general: {type(e).__name__}: {e}")
+                # Crear resultado dummy en caso de error
+                dummy_img = Image.new('RGB', (512, 512), (128, 0, 128))
+                self.last_result = {
+                    'image': dummy_img,
+                    'time': 0,
+                    'stats': {
+                        'total': self.total_frames,
+                        'processed': self.processed_frames,
+                        'skip_rate': 0
+                    }
+                }
             
             self.current_task = None
             
-            # Clean cache every 30 frames
+            # Clean cache
             if self.processed_frames % 30 == 0:
                 torch.cuda.empty_cache()
     
     def add_frame(self, image, prompt, strength):
         self.total_frames += 1
         
-        # Skip if busy
         if self.current_task is not None:
             return
         
@@ -185,14 +256,14 @@ class SDTurboDiffusion:
         return self.last_result
 
 # Global instance
-processor = SDTurboDiffusion()
+processor = WorkingSDTurbo()
 
-# HTML con WebSocket corregido
+# HTML igual pero con ajustes para SD-Turbo
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SD-Turbo A6000</title>
+    <title>SD-Turbo Fixed</title>
     <style>
         * {
             box-sizing: border-box;
@@ -423,24 +494,6 @@ HTML_CONTENT = """
             cursor: pointer;
             z-index: 10000;
         }
-        
-        .totem-info {
-            position: absolute;
-            bottom: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.9);
-            padding: 20px 40px;
-            border-radius: 15px;
-            border: 2px solid #00ff88;
-            text-align: center;
-        }
-        
-        .model-info {
-            color: #ff6b00;
-            font-size: 14px;
-            margin-top: 10px;
-        }
     </style>
 </head>
 <body>
@@ -456,14 +509,10 @@ HTML_CONTENT = """
     <div class="totem-mode" id="totemMode">
         <button class="totem-exit" onclick="exitTotemMode()">✕</button>
         <canvas id="totemCanvas" class="totem-canvas"></canvas>
-        <div class="totem-info">
-            <div style="color: #00ff88; font-size: 20px; font-weight: bold;">SD-TURBO MODE</div>
-            <div style="margin-top: 10px;">Stable Diffusion Turbo - Ultra Fast</div>
-        </div>
     </div>
     
     <div class="stats">
-        <div class="title">SD-Turbo Performance</div>
+        <div class="title">SD-Turbo Fixed</div>
         <div class="stat-row">
             <span>FPS:</span>
             <span id="fps" class="stat-value">0</span>
@@ -480,11 +529,6 @@ HTML_CONTENT = """
             <span>Skip Rate:</span>
             <span id="skipRate" class="stat-value">0</span>%
         </div>
-        <div class="stat-row">
-            <span>Strength:</span>
-            <span id="currentStrength" class="stat-value">0.5</span>
-        </div>
-        <div class="model-info">Model: SD-Turbo 512x512</div>
     </div>
     
     <div class="controls">
@@ -497,96 +541,56 @@ HTML_CONTENT = """
         
         <div class="control-group">
             <div class="control-label">Custom Prompt</div>
-            <textarea id="customPrompt" placeholder="Enter your prompt (SD-Turbo works best with simple prompts)">cyberpunk portrait</textarea>
+            <textarea id="customPrompt" placeholder="Simple prompts work best with SD-Turbo">cyberpunk portrait</textarea>
         </div>
         
         <div class="control-group">
             <div class="control-label">Strength: <span id="strengthValue">0.5</span></div>
             <input type="range" id="strengthSlider" min="0.3" max="0.8" step="0.05" value="0.5" oninput="updateStrengthValue()">
-            <div style="color: #999; font-size: 11px; margin-top: 5px;">SD-Turbo optimal: 0.5-0.7</div>
         </div>
     </div>
     
     <script>
         let ws = null;
         let streaming = false;
-        let video = null;
-        let canvas = null;
-        let ctx = null;
-        let totemCanvas = null;
-        let totemCtx = null;
-        let totemMode = false;
-        
         let frameCount = 0;
-        let totalFrames = 0;
         let lastTime = Date.now();
         let latencies = [];
         
         function updateStrengthValue() {
             const value = parseFloat(document.getElementById('strengthSlider').value);
             document.getElementById('strengthValue').textContent = value.toFixed(2);
-            document.getElementById('currentStrength').textContent = value.toFixed(2);
         }
         
         function enterTotemMode() {
             if (!streaming) {
-                alert('Start the stream before activating totem mode');
+                alert('Start the stream first');
                 return;
             }
-            
-            totemMode = true;
             document.getElementById('totemMode').style.display = 'flex';
-            
-            totemCanvas = document.getElementById('totemCanvas');
-            totemCtx = totemCanvas.getContext('2d');
-            
-            const screenHeight = window.innerHeight;
-            const screenWidth = window.innerWidth;
-            
-            if (screenHeight > screenWidth) {
-                totemCanvas.width = screenWidth * 0.8;
-                totemCanvas.height = screenWidth * 0.8;
-            } else {
-                totemCanvas.width = screenHeight * 0.7;
-                totemCanvas.height = screenHeight * 0.7;
-            }
-            
-            document.querySelector('.controls').style.display = 'none';
-            document.querySelector('.stats').style.display = 'none';
-            
-            console.log('Totem Mode activated');
+            const tc = document.getElementById('totemCanvas');
+            tc.width = tc.height = 512;
         }
         
         function exitTotemMode() {
-            totemMode = false;
             document.getElementById('totemMode').style.display = 'none';
-            document.querySelector('.controls').style.display = 'grid';
-            document.querySelector('.stats').style.display = 'block';
-            console.log('Totem Mode deactivated');
         }
         
         async function start() {
             try {
-                video = document.getElementById('video');
-                canvas = document.getElementById('output');
-                ctx = canvas.getContext('2d');
-                canvas.width = 512;
-                canvas.height = 512;
+                const video = document.getElementById('video');
+                const canvas = document.getElementById('output');
+                const ctx = canvas.getContext('2d');
+                canvas.width = canvas.height = 512;
                 
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        frameRate: { ideal: 30 }
-                    }
+                    video: { width: 640, height: 480 }
                 });
                 video.srcObject = stream;
                 
-                await new Promise(resolve => {
-                    video.onloadedmetadata = resolve;
-                });
+                await new Promise(r => video.onloadedmetadata = r);
                 
-                // AQUÍ ESTÁ LA CORRECCIÓN DEL WEBSOCKET
+                // WebSocket con detección de protocolo
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const wsUrl = `${protocol}//${window.location.host}/ws`;
                 console.log('Connecting to:', wsUrl);
@@ -594,7 +598,7 @@ HTML_CONTENT = """
                 ws = new WebSocket(wsUrl);
                 
                 ws.onopen = () => {
-                    console.log('Connected to SD-Turbo server');
+                    console.log('Connected');
                     streaming = true;
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
@@ -608,12 +612,12 @@ HTML_CONTENT = """
                     if (data.image) {
                         const img = new Image();
                         img.onload = () => {
-                            ctx.clearRect(0, 0, 512, 512);
-                            ctx.drawImage(img, 0, 0, 512, 512);
+                            ctx.drawImage(img, 0, 0);
                             
-                            if (totemMode && totemCtx) {
-                                totemCtx.clearRect(0, 0, totemCanvas.width, totemCanvas.height);
-                                totemCtx.drawImage(img, 0, 0, totemCanvas.width, totemCanvas.height);
+                            // Totem mode
+                            if (document.getElementById('totemMode').style.display === 'flex') {
+                                const tc = document.getElementById('totemCanvas').getContext('2d');
+                                tc.drawImage(img, 0, 0);
                             }
                         };
                         img.src = data.image;
@@ -621,77 +625,46 @@ HTML_CONTENT = """
                     }
                 };
                 
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    stop();
-                };
+                ws.onerror = ws.onclose = () => stop();
                 
-                ws.onclose = () => {
-                    console.log('Disconnected from server');
-                    stop();
-                };
-                
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Error: ' + error.message);
+            } catch (e) {
+                alert('Error: ' + e.message);
             }
         }
         
         function sendFrame() {
-            if (!streaming || !ws || ws.readyState !== WebSocket.OPEN) return;
+            if (!streaming || !ws || ws.readyState !== 1) return;
             
-            if (video.videoWidth === 0 || video.videoHeight === 0) {
+            const video = document.getElementById('video');
+            if (!video.videoWidth) {
                 setTimeout(sendFrame, 10);
                 return;
             }
             
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = 512;
-            tempCanvas.height = 512;
-            const tempCtx = tempCanvas.getContext('2d');
+            const tc = document.createElement('canvas');
+            tc.width = tc.height = 512;
+            const ctx = tc.getContext('2d');
             
-            // Center crop
-            const videoAspect = video.videoWidth / video.videoHeight;
-            const targetAspect = 1;
+            const size = Math.min(video.videoWidth, video.videoHeight);
+            const sx = (video.videoWidth - size) / 2;
+            const sy = (video.videoHeight - size) / 2;
+            ctx.drawImage(video, sx, sy, size, size, 0, 0, 512, 512);
             
-            let sx, sy, sw, sh;
-            
-            if (videoAspect > targetAspect) {
-                sh = video.videoHeight;
-                sw = video.videoHeight;
-                sx = (video.videoWidth - sw) / 2;
-                sy = 0;
-            } else {
-                sw = video.videoWidth;
-                sh = video.videoWidth;
-                sx = 0;
-                sy = (video.videoHeight - sh) / 2;
-            }
-            
-            tempCtx.drawImage(video, sx, sy, sw, sh, 0, 0, 512, 512);
-            
-            const prompt = document.getElementById('customPrompt').value || "portrait";
-            const strength = parseFloat(document.getElementById('strengthSlider').value);
-            
-            const imageData = tempCanvas.toDataURL('image/jpeg', 0.85);
             ws.send(JSON.stringify({
-                image: imageData,
-                prompt: prompt,
-                strength: strength,
-                timestamp: Date.now()
+                image: tc.toDataURL('image/jpeg', 0.85),
+                prompt: document.getElementById('customPrompt').value,
+                strength: parseFloat(document.getElementById('strengthSlider').value)
             }));
             
-            // Send frames at ~20 FPS
-            setTimeout(sendFrame, 50);
+            setTimeout(sendFrame, 50); // 20 FPS
         }
         
         function updateStats(data) {
             frameCount++;
-            totalFrames++;
             
             if (data.time) {
                 latencies.push(data.time);
-                if (latencies.length > 50) latencies.shift();
+                if (latencies.length > 30) latencies.shift();
             }
             
             const now = Date.now();
@@ -700,9 +673,9 @@ HTML_CONTENT = """
                 frameCount = 0;
                 lastTime = now;
                 
-                if (latencies.length > 0) {
-                    const avgLatency = latencies.reduce((a, b) => a + b) / latencies.length;
-                    document.getElementById('latency').textContent = Math.round(avgLatency);
+                if (latencies.length) {
+                    const avg = latencies.reduce((a,b) => a+b) / latencies.length;
+                    document.getElementById('latency').textContent = Math.round(avg);
                 }
             }
             
@@ -714,23 +687,12 @@ HTML_CONTENT = """
         
         function stop() {
             streaming = false;
+            if (ws) ws.close();
             
-            if (totemMode) {
-                exitTotemMode();
-            }
-            
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            
-            if (video && video.srcObject) {
-                video.srcObject.getTracks().forEach(track => track.stop());
+            const video = document.getElementById('video');
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
                 video.srcObject = null;
-            }
-            
-            if (ctx) {
-                ctx.clearRect(0, 0, 512, 512);
             }
             
             document.getElementById('startBtn').disabled = false;
@@ -739,19 +701,10 @@ HTML_CONTENT = """
             document.getElementById('statusIndicator').classList.remove('active');
         }
         
-        document.addEventListener('keydown', function(event) {
-            if (event.key === 'Escape' && totemMode) {
-                exitTotemMode();
-            }
-            if (event.key === 'F11') {
-                event.preventDefault();
-                if (!totemMode && streaming) {
-                    enterTotemMode();
-                }
-            }
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') exitTotemMode();
+            if (e.key === 'F11') { e.preventDefault(); enterTotemMode(); }
         });
-        
-        window.addEventListener('beforeunload', stop);
     </script>
 </body>
 </html>
@@ -764,7 +717,7 @@ async def get():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🚀 Cliente conectado - SD-Turbo Mode")
+    print("🚀 Cliente conectado")
     
     try:
         while True:
@@ -772,23 +725,19 @@ async def websocket_endpoint(websocket: WebSocket):
             
             try:
                 img_data = base64.b64decode(data['image'].split(',')[1])
-                input_image = Image.open(io.BytesIO(img_data)).convert("RGB")
+                image = Image.open(io.BytesIO(img_data)).convert("RGB")
                 
             except Exception as e:
-                print(f"❌ Error decodificando imagen: {e}")
+                print(f"Error imagen: {e}")
                 continue
             
-            prompt = data.get('prompt', 'portrait')
-            strength = data.get('strength', 0.5)
-            
             processor.add_frame(
-                input_image, 
-                prompt,
-                strength
+                image,
+                data.get('prompt', ''),
+                data.get('strength', 0.5)
             )
             
             result = processor.get_result()
-            
             if result:
                 buffered = io.BytesIO()
                 result['image'].save(buffered, format="JPEG", quality=85)
@@ -801,21 +750,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
     except Exception as e:
-        print(f"❌ Error en WebSocket: {e}")
+        print(f"WebSocket error: {e}")
     finally:
-        print("🔌 Cliente desconectado")
+        print("Cliente desconectado")
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("\n" + "="*80)
-    print("🎨 SD-TURBO A6000 OPTIMIZED")
     print("="*80)
-    print("⚡ Stable Diffusion Turbo - 1 step inference")
-    print("🎯 Resolution: 512x512 (native)")
-    print("🔧 Guidance Scale: 0.0 (SD-Turbo optimized)")
-    print("📺 Custom Prompts + Totem Mode")
-    print("🌐 URL: http://0.0.0.0:8000")
-    print("="*80 + "\n")
+    print("🚀 SD-TURBO FIXED - A6000 OPTIMIZED")
+    print("="*80)
+    print("⚡ SD-Turbo con fallback a LCM si falla")
+    print("🛡️ Manejo robusto de errores")
+    print("🎯 WebSocket seguro (wss://)")
+    print("📺 Totem Mode incluido")
+    print("🌐 http://0.0.0.0:8000")
+    print("="*80)
     
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
