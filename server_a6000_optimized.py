@@ -17,12 +17,22 @@ os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 import torch
 import torch.nn.functional as F
 
+# Optimizaciones para A6000
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+torch.cuda.set_per_process_memory_fraction(0.9)
+
+# Desactivar torch.compile que está causando problemas
+torch._dynamo.config.suppress_errors = True
+
 # Verificar CUDA
 if not torch.cuda.is_available():
     print("ERROR: CUDA no disponible")
     sys.exit(1)
 
 print(f"CUDA OK: {torch.cuda.get_device_name(0)}")
+print(f"Memoria GPU: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,153 +50,158 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class UltraFastDiffusion:
+class A6000OptimizedDiffusion:
     def __init__(self):
         self.pipe = None
         self.device = torch.device("cuda:0")
         self.dtype = torch.float16
         
-        # Resolución dinámica para velocidad
-        self.resolution = 384  # Reducido de 512
+        # Configuración optimizada para A6000
+        self.resolution = 320  # Resolución intermedia optimizada
+        self.batch_size = 1
         
-        # Processing ultra-optimizado
-        self.processing = False
+        # Queues optimizadas
+        self.current_task = None
         self.last_result = None
-        self.last_latents = None
-        self.frame_counter = 0
+        self.processing = False
         
-        # Performance metrics
+        # Metrics
         self.total_frames = 0
         self.processed_frames = 0
         
         self.init_model()
         
     def init_model(self):
-        print("Inicializando Ultra Fast Diffusion...")
+        print("Inicializando A6000 Optimized Diffusion...")
         
-        # Opciones de modelos rápidos
+        # Probar diferentes modelos en orden de velocidad
         model_options = [
-            "SimianLuo/LCM_Dreamshaper_v7",  # Primero intentar con LCM
-            "stabilityai/sd-turbo",  # Backup: SD-Turbo
-            "nota-ai/bk-sdm-small",  # Backup: Modelo pequeño
+            ("nota-ai/bk-sdm-small", "small"),  # Modelo más pequeño
+            ("SimianLuo/LCM_Dreamshaper_v7", "lcm"),  # LCM
+            ("stabilityai/sd-turbo", "turbo"),  # SD-Turbo
         ]
         
-        for model_id in model_options:
+        for model_id, model_type in model_options:
             try:
-                print(f"Intentando cargar {model_id}...")
+                print(f"Cargando {model_id}...")
                 
-                if "turbo" in model_id:
-                    self.pipe = AutoPipelineForImage2Image.from_pretrained(
+                # Configuración específica por modelo
+                if model_type == "small":
+                    self.pipe = DiffusionPipeline.from_pretrained(
                         model_id,
                         torch_dtype=self.dtype,
                         safety_checker=None,
-                        variant="fp16"
+                        custom_pipeline="latent_consistency_img2img",
                     )
                 else:
                     self.pipe = AutoPipelineForImage2Image.from_pretrained(
                         model_id,
                         torch_dtype=self.dtype,
                         safety_checker=None,
-                        use_safetensors=True
+                        use_safetensors=True,
+                        variant="fp16" if "turbo" in model_type else None
                     )
                 
-                print(f"✓ Modelo {model_id} cargado exitosamente")
+                print(f"✓ Modelo {model_id} cargado")
                 break
                 
             except Exception as e:
-                print(f"⚠ Error cargando {model_id}: {e}")
+                print(f"⚠ Error con {model_id}: {e}")
                 continue
-        
-        if self.pipe is None:
-            print("ERROR: No se pudo cargar ningún modelo")
-            sys.exit(1)
         
         self.pipe = self.pipe.to(self.device)
         
-        # Scheduler ultra-rápido
+        # LCM Scheduler para todos los modelos
         self.pipe.scheduler = LCMScheduler.from_config(self.pipe.scheduler.config)
         
         # Optimizaciones críticas
         self.pipe.set_progress_bar_config(disable=True)
         
-        # XFormers
+        # XFormers es crítico para A6000
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
-            print("✓ XFormers habilitado")
-        except:
-            print("⚠ XFormers no disponible")
+            print("✓ XFormers habilitado - CRÍTICO para rendimiento")
+        except Exception as e:
+            print(f"❌ ERROR: XFormers falló: {e}")
+            print("⚠️  El rendimiento será MUCHO menor sin XFormers")
         
         # VAE optimizations
         try:
             self.pipe.vae.enable_slicing()
             self.pipe.vae.enable_tiling()
-            print("✓ VAE optimizado")
+            print("✓ VAE optimizado con slicing y tiling")
         except:
             pass
         
-        # Optimización adicional: compilar con torch.compile si está disponible
+        # Optimización adicional: channels_last memory format
         try:
-            self.pipe.unet = torch.compile(self.pipe.unet, mode="reduce-overhead")
-            print("✓ UNet compilado con torch.compile")
+            self.pipe.unet = self.pipe.unet.to(memory_format=torch.channels_last)
+            self.pipe.vae = self.pipe.vae.to(memory_format=torch.channels_last)
+            print("✓ Memory format optimizado (channels_last)")
         except:
-            print("⚠ torch.compile no disponible")
+            pass
         
-        # Pre-calentar con resolución reducida
-        print(f"Pre-calentando pipeline a {self.resolution}x{self.resolution}...")
+        # Pre-calentar
+        print(f"Pre-calentando a {self.resolution}x{self.resolution}...")
         dummy_image = Image.new('RGB', (self.resolution, self.resolution), color=(128, 128, 128))
         
-        try:
-            with torch.no_grad():
-                with torch.cuda.amp.autocast():
-                    _ = self.pipe(
-                        "test",
-                        image=dummy_image,
-                        num_inference_steps=1,
-                        strength=0.3,
-                        guidance_scale=1.0
-                    ).images[0]
-            print("✓ Pre-calentamiento exitoso")
-        except Exception as e:
-            print(f"⚠ Pre-calentamiento falló: {e}")
+        for i in range(3):  # 3 warmup runs
+            try:
+                with torch.no_grad():
+                    with torch.cuda.amp.autocast(dtype=self.dtype):
+                        _ = self.pipe(
+                            prompt="test",
+                            image=dummy_image,
+                            num_inference_steps=1,
+                            strength=0.3,
+                            guidance_scale=1.0,
+                            output_type="pil"
+                        ).images[0]
+                print(f"✓ Warmup {i+1}/3")
+            except Exception as e:
+                print(f"⚠ Warmup {i+1} falló: {e}")
         
-        # Limpiar memoria
+        # Limpiar cache después del warmup
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
         
-        print("✓ Ultra Fast Diffusion listo!")
+        print("✓ A6000 Optimized Diffusion listo!")
         self.start_processing_thread()
     
     def start_processing_thread(self):
         self.processing = True
-        self.current_task = None
-        processing_thread = threading.Thread(target=self._processing_loop_ultra, daemon=True)
-        processing_thread.start()
+        thread = threading.Thread(target=self._processing_loop, daemon=True)
+        thread.start()
     
-    def _processing_loop_ultra(self):
-        """Loop ultra-optimizado con latent caching"""
+    def _processing_loop(self):
+        """Loop optimizado para A6000"""
         while self.processing:
-            if self.current_task:
+            if self.current_task is not None:
                 try:
                     start_time = time.time()
                     
-                    # Reducir imagen a resolución óptima
+                    # Preparar imagen
                     image = self.current_task['image']
                     if image.size[0] != self.resolution:
                         image = image.resize((self.resolution, self.resolution), Image.Resampling.LANCZOS)
                     
-                    # Ultra-fast generation
+                    # Generación optimizada
                     with torch.no_grad():
-                        with torch.cuda.amp.autocast():
-                            # Usar latents cacheados si es posible
+                        with torch.cuda.amp.autocast(dtype=self.dtype):
                             result = self.pipe(
-                                prompt=self.current_task['prompt'],
+                                prompt=self.current_task['prompt'] or "",
                                 image=image,
                                 num_inference_steps=1,
-                                strength=min(self.current_task['strength'], 0.5),  # Limitar strength
-                                guidance_scale=1.0,  # Siempre 1.0 para velocidad
-                                output_type="pil"
+                                strength=min(self.current_task['strength'], 0.4),
+                                guidance_scale=1.0,
+                                output_type="pil",
+                                return_dict=True
                             ).images[0]
                     
-                    # Escalar de vuelta a 512x512 para display
+                    # Sincronizar GPU
+                    torch.cuda.synchronize()
+                    
+                    # Escalar resultado
                     if result.size[0] != 512:
                         result = result.resize((512, 512), Image.Resampling.LANCZOS)
                     
@@ -208,27 +223,27 @@ class UltraFastDiffusion:
                     print(f"Frame: {processing_time:.1f}ms @ {self.resolution}px")
                     self.current_task = None
                     
+                    # Limpiar cache periódicamente
+                    if self.processed_frames % 50 == 0:
+                        torch.cuda.empty_cache()
+                    
                 except Exception as e:
-                    print(f"Error: {e}")
+                    print(f"Error procesando: {e}")
                     self.current_task = None
+                    torch.cuda.empty_cache()
             else:
                 time.sleep(0.001)
     
     def process_frame(self, image, prompt, strength, timestamp):
         self.total_frames += 1
-        self.frame_counter += 1
         
-        # Procesar solo 1 de cada 2 frames si es muy lento
-        if self.frame_counter % 2 != 0 and self.current_task is not None:
-            return
-        
-        # Skip si ya estamos procesando
+        # Skip si estamos procesando
         if self.current_task is not None:
             return
         
         self.current_task = {
             'image': image,
-            'prompt': prompt or "photo",
+            'prompt': prompt,
             'strength': strength,
             'timestamp': timestamp
         }
@@ -237,19 +252,19 @@ class UltraFastDiffusion:
         return self.last_result
     
     def set_resolution(self, res):
-        """Cambiar resolución dinámicamente"""
         self.resolution = res
-        print(f"Resolución cambiada a {res}x{res}")
+        torch.cuda.empty_cache()
+        print(f"Resolución: {res}x{res}")
 
 # Instancia global
-processor = UltraFastDiffusion()
+processor = A6000OptimizedDiffusion()
 
-# HTML con controles de resolución
+# HTML optimizado para A6000
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Ultra Fast Diffusion</title>
+    <title>A6000 Optimized Diffusion</title>
     <style>
         * {
             box-sizing: border-box;
@@ -287,6 +302,22 @@ HTML_CONTENT = """
             position: relative;
         }
         
+        .status-indicator {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #ff4444;
+            transition: all 0.3s;
+        }
+        
+        .status-indicator.active {
+            background: #00ff88;
+            box-shadow: 0 0 15px #00ff88;
+        }
+        
         .controls {
             position: fixed;
             bottom: 20px;
@@ -298,7 +329,7 @@ HTML_CONTENT = """
             border: 2px solid #00ff88;
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
+            gap: 25px;
             z-index: 1000;
             backdrop-filter: blur(10px);
         }
@@ -306,7 +337,7 @@ HTML_CONTENT = """
         .control-group {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 12px;
         }
         
         .control-label {
@@ -315,23 +346,25 @@ HTML_CONTENT = """
             font-size: 14px;
             text-transform: uppercase;
             letter-spacing: 1px;
+            margin-bottom: 5px;
         }
         
         button {
-            padding: 12px 24px;
-            font-size: 14px;
+            padding: 15px 30px;
+            font-size: 16px;
             cursor: pointer;
             background: linear-gradient(45deg, #00ff88, #00cc66);
             color: #000;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             font-weight: bold;
             transition: all 0.3s;
+            text-transform: uppercase;
         }
         
         button:hover {
             transform: scale(1.05);
-            box-shadow: 0 0 20px #00ff88;
+            box-shadow: 0 0 25px #00ff88;
         }
         
         button:disabled {
@@ -349,39 +382,43 @@ HTML_CONTENT = """
         
         input[type="range"] {
             width: 100%;
-            height: 6px;
+            height: 8px;
             -webkit-appearance: none;
             background: linear-gradient(90deg, #333, #00ff88);
             outline: none;
-            border-radius: 3px;
+            border-radius: 4px;
         }
         
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 20px;
-            height: 20px;
+            width: 24px;
+            height: 24px;
             background: #00ff88;
             border-radius: 50%;
             cursor: pointer;
+            box-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
         }
         
         textarea {
-            padding: 10px;
-            font-size: 13px;
-            border-radius: 8px;
+            padding: 15px;
+            font-size: 14px;
+            border-radius: 10px;
             background: #1a1a1a;
             color: #fff;
             border: 2px solid #00ff88;
             font-family: 'Consolas', monospace;
-            resize: none;
-            height: 60px;
+            resize: vertical;
+            min-height: 80px;
+            max-height: 120px;
         }
         
         .range-value {
             color: #00ff88;
             font-weight: bold;
             text-align: center;
-            font-size: 16px;
+            font-size: 18px;
+            margin-top: 5px;
+            text-shadow: 0 0 10px #00ff88;
         }
         
         .stats {
@@ -389,11 +426,13 @@ HTML_CONTENT = """
             top: 20px;
             right: 20px;
             background: rgba(10, 10, 10, 0.95);
-            padding: 20px;
-            border-radius: 15px;
+            padding: 25px;
+            border-radius: 20px;
+            font-family: 'Consolas', monospace;
             font-size: 12px;
             border: 2px solid #00ff88;
-            min-width: 250px;
+            min-width: 280px;
+            backdrop-filter: blur(10px);
         }
         
         .stat-value {
@@ -404,27 +443,19 @@ HTML_CONTENT = """
         .stat-row {
             display: flex;
             justify-content: space-between;
-            margin: 8px 0;
-            padding-bottom: 5px;
+            margin: 10px 0;
             border-bottom: 1px solid #333;
+            padding-bottom: 8px;
         }
         
-        .resolution-buttons {
-            display: flex;
-            gap: 10px;
-            margin-top: 5px;
-        }
-        
-        .res-btn {
-            flex: 1;
-            padding: 8px;
-            font-size: 12px;
-            background: #444;
-        }
-        
-        .res-btn.active {
-            background: #00ff88;
-            color: #000;
+        .title {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00ff88;
+            font-size: 16px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 2px;
         }
         
         /* Modo Totem */
@@ -446,6 +477,8 @@ HTML_CONTENT = """
             max-height: 90vh;
             width: auto;
             height: auto;
+            border: none;
+            box-shadow: 0 0 50px rgba(0, 255, 136, 0.5);
         }
         
         .totem-exit {
@@ -456,16 +489,53 @@ HTML_CONTENT = """
             color: white;
             border: none;
             border-radius: 50%;
-            width: 60px;
-            height: 60px;
-            font-size: 24px;
+            width: 70px;
+            height: 70px;
+            font-size: 28px;
             cursor: pointer;
+            z-index: 10000;
         }
         
-        .warning {
-            color: #ff6b00;
+        .totem-info {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.9);
+            padding: 20px 40px;
+            border-radius: 15px;
+            border: 2px solid #00ff88;
+            text-align: center;
+        }
+        
+        .resolution-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .res-btn {
+            flex: 1;
+            padding: 10px;
+            font-size: 14px;
+            background: #444;
+            border: 1px solid #666;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .res-btn.active {
+            background: #00ff88;
+            color: #000;
+            border-color: #00ff88;
+        }
+        
+        .performance-info {
+            color: #999;
             font-size: 11px;
             margin-top: 5px;
+            text-align: center;
         }
     </style>
 </head>
@@ -474,6 +544,7 @@ HTML_CONTENT = """
         <video id="video" autoplay muted playsinline></video>
         <div class="output-container">
             <canvas id="output"></canvas>
+            <div class="status-indicator" id="statusIndicator"></div>
         </div>
     </div>
     
@@ -481,12 +552,14 @@ HTML_CONTENT = """
     <div class="totem-mode" id="totemMode">
         <button class="totem-exit" onclick="exitTotemMode()">✕</button>
         <canvas id="totemCanvas" class="totem-canvas"></canvas>
+        <div class="totem-info">
+            <div style="color: #00ff88; font-size: 20px; font-weight: bold;">A6000 OPTIMIZED MODE</div>
+            <div style="margin-top: 10px;">RTX A6000 - 48GB VRAM</div>
+        </div>
     </div>
     
     <div class="stats">
-        <div style="text-align: center; margin-bottom: 15px; color: #00ff88; font-weight: bold;">
-            ULTRA FAST MODE
-        </div>
+        <div class="title">A6000 Performance</div>
         <div class="stat-row">
             <span>FPS:</span>
             <span id="fps" class="stat-value">0</span>
@@ -497,7 +570,7 @@ HTML_CONTENT = """
         </div>
         <div class="stat-row">
             <span>Resolution:</span>
-            <span id="resolution" class="stat-value">384</span>px
+            <span id="resolution" class="stat-value">320</span>px
         </div>
         <div class="stat-row">
             <span>Total Frames:</span>
@@ -507,49 +580,62 @@ HTML_CONTENT = """
             <span>Skip Rate:</span>
             <span id="skipRate" class="stat-value">0</span>%
         </div>
+        <div class="stat-row">
+            <span>Strength:</span>
+            <span id="currentStrength" class="stat-value">0.3</span>
+        </div>
     </div>
     
     <div class="controls">
         <div class="control-group">
-            <div class="control-label">Control</div>
-            <button id="startBtn" onclick="start()">🚀 Start</button>
+            <div class="control-label">System Control</div>
+            <button id="startBtn" onclick="start()">🚀 Start Stream</button>
             <button id="stopBtn" onclick="stop()" disabled>⏹ Stop</button>
-            <button class="totem-btn" onclick="enterTotemMode()" id="totemBtn" disabled>📺 Totem</button>
+            <button class="totem-btn" onclick="enterTotemMode()" id="totemBtn" disabled>📺 Totem Mode</button>
         </div>
         
         <div class="control-group">
-            <div class="control-label">Resolution (Speed)</div>
+            <div class="control-label">Resolution</div>
             <div class="resolution-buttons">
                 <button class="res-btn" onclick="setResolution(256)" id="res256">256px</button>
-                <button class="res-btn active" onclick="setResolution(384)" id="res384">384px</button>
-                <button class="res-btn" onclick="setResolution(512)" id="res512">512px</button>
+                <button class="res-btn active" onclick="setResolution(320)" id="res320">320px</button>
+                <button class="res-btn" onclick="setResolution(384)" id="res384">384px</button>
             </div>
-            <div class="warning">Lower = Faster</div>
+            <div class="performance-info">Lower = Faster | 320px recommended</div>
         </div>
         
         <div class="control-group">
-            <div class="control-label">Prompt</div>
-            <textarea id="customPrompt" placeholder="Simple prompts work best...">cyberpunk portrait</textarea>
+            <div class="control-label">Custom Prompt</div>
+            <textarea id="customPrompt" placeholder="Enter your prompt (simple = faster)">cyberpunk portrait</textarea>
         </div>
         
         <div class="control-group">
             <div class="control-label">Strength: <span id="strengthValue">0.3</span></div>
-            <input type="range" id="strengthSlider" min="0.2" max="0.5" step="0.05" value="0.3" oninput="updateStrength()">
-            <div class="warning">Max 0.5 for speed</div>
+            <input type="range" id="strengthSlider" min="0.2" max="0.4" step="0.05" value="0.3" oninput="updateStrengthValue()">
+            <div class="performance-info">Limited to 0.4 for optimal speed</div>
         </div>
     </div>
     
     <script>
         let ws = null;
         let streaming = false;
+        let video = null;
+        let canvas = null;
+        let ctx = null;
+        let totemCanvas = null;
+        let totemCtx = null;
+        let totemMode = false;
+        let currentResolution = 320;
+        
         let frameCount = 0;
+        let totalFrames = 0;
         let lastTime = Date.now();
         let latencies = [];
-        let currentResolution = 384;
         
-        function updateStrength() {
-            document.getElementById('strengthValue').textContent = 
-                document.getElementById('strengthSlider').value;
+        function updateStrengthValue() {
+            const value = parseFloat(document.getElementById('strengthSlider').value);
+            document.getElementById('strengthValue').textContent = value.toFixed(2);
+            document.getElementById('currentStrength').textContent = value.toFixed(2);
         }
         
         function setResolution(res) {
@@ -558,7 +644,6 @@ HTML_CONTENT = """
             document.getElementById('res' + res).classList.add('active');
             document.getElementById('resolution').textContent = res;
             
-            // Enviar cambio al servidor
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'resolution',
@@ -568,27 +653,56 @@ HTML_CONTENT = """
         }
         
         function enterTotemMode() {
+            if (!streaming) {
+                alert('Start the stream before activating totem mode');
+                return;
+            }
+            
+            totemMode = true;
             document.getElementById('totemMode').style.display = 'flex';
-            const totemCanvas = document.getElementById('totemCanvas');
-            const totemCtx = totemCanvas.getContext('2d');
-            totemCanvas.width = 512;
-            totemCanvas.height = 512;
+            
+            totemCanvas = document.getElementById('totemCanvas');
+            totemCtx = totemCanvas.getContext('2d');
+            
+            const screenHeight = window.innerHeight;
+            const screenWidth = window.innerWidth;
+            
+            if (screenHeight > screenWidth) {
+                totemCanvas.width = screenWidth * 0.8;
+                totemCanvas.height = screenWidth * 0.8;
+            } else {
+                totemCanvas.width = screenHeight * 0.7;
+                totemCanvas.height = screenHeight * 0.7;
+            }
+            
+            document.querySelector('.controls').style.display = 'none';
+            document.querySelector('.stats').style.display = 'none';
+            
+            console.log('Totem Mode activated');
         }
         
         function exitTotemMode() {
+            totemMode = false;
             document.getElementById('totemMode').style.display = 'none';
+            document.querySelector('.controls').style.display = 'grid';
+            document.querySelector('.stats').style.display = 'block';
+            console.log('Totem Mode deactivated');
         }
         
         async function start() {
             try {
-                const video = document.getElementById('video');
-                const canvas = document.getElementById('output');
-                const ctx = canvas.getContext('2d');
+                video = document.getElementById('video');
+                canvas = document.getElementById('output');
+                ctx = canvas.getContext('2d');
                 canvas.width = 512;
                 canvas.height = 512;
                 
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 640, height: 480, frameRate: 30 }
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        frameRate: { ideal: 30 }
+                    }
                 });
                 video.srcObject = stream;
                 
@@ -600,11 +714,12 @@ HTML_CONTENT = """
                 ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
                 
                 ws.onopen = () => {
-                    console.log('Connected');
+                    console.log('Connected to A6000 Optimized server');
                     streaming = true;
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
                     document.getElementById('totemBtn').disabled = false;
+                    document.getElementById('statusIndicator').classList.add('active');
                     sendFrame();
                 };
                 
@@ -613,13 +728,12 @@ HTML_CONTENT = """
                     if (data.image) {
                         const img = new Image();
                         img.onload = () => {
+                            ctx.clearRect(0, 0, 512, 512);
                             ctx.drawImage(img, 0, 0, 512, 512);
                             
-                            // Totem mode
-                            const totemCanvas = document.getElementById('totemCanvas');
-                            if (totemCanvas && document.getElementById('totemMode').style.display === 'flex') {
-                                const totemCtx = totemCanvas.getContext('2d');
-                                totemCtx.drawImage(img, 0, 0, 512, 512);
+                            if (totemMode && totemCtx) {
+                                totemCtx.clearRect(0, 0, totemCanvas.width, totemCanvas.height);
+                                totemCtx.drawImage(img, 0, 0, totemCanvas.width, totemCanvas.height);
                             }
                         };
                         img.src = data.image;
@@ -627,8 +741,15 @@ HTML_CONTENT = """
                     }
                 };
                 
-                ws.onerror = () => stop();
-                ws.onclose = () => stop();
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    stop();
+                };
+                
+                ws.onclose = () => {
+                    console.log('Disconnected from server');
+                    stop();
+                };
                 
             } catch (error) {
                 console.error('Error:', error);
@@ -639,8 +760,7 @@ HTML_CONTENT = """
         function sendFrame() {
             if (!streaming || !ws || ws.readyState !== WebSocket.OPEN) return;
             
-            const video = document.getElementById('video');
-            if (!video.videoWidth) {
+            if (video.videoWidth === 0 || video.videoHeight === 0) {
                 setTimeout(sendFrame, 10);
                 return;
             }
@@ -650,31 +770,49 @@ HTML_CONTENT = """
             tempCanvas.height = 512;
             const tempCtx = tempCanvas.getContext('2d');
             
-            const size = Math.min(video.videoWidth, video.videoHeight);
-            const sx = (video.videoWidth - size) / 2;
-            const sy = (video.videoHeight - size) / 2;
-            tempCtx.drawImage(video, sx, sy, size, size, 0, 0, 512, 512);
+            // Center crop
+            const videoAspect = video.videoWidth / video.videoHeight;
+            const targetAspect = 1;
             
-            const prompt = document.getElementById('customPrompt').value || "";
+            let sx, sy, sw, sh;
+            
+            if (videoAspect > targetAspect) {
+                sh = video.videoHeight;
+                sw = video.videoHeight;
+                sx = (video.videoWidth - sw) / 2;
+                sy = 0;
+            } else {
+                sw = video.videoWidth;
+                sh = video.videoWidth;
+                sx = 0;
+                sy = (video.videoHeight - sh) / 2;
+            }
+            
+            tempCtx.drawImage(video, sx, sy, sw, sh, 0, 0, 512, 512);
+            
+            const prompt = document.getElementById('customPrompt').value || "portrait";
             const strength = parseFloat(document.getElementById('strengthSlider').value);
             
+            const imageData = tempCanvas.toDataURL('image/jpeg', 0.85);
             ws.send(JSON.stringify({
                 type: 'frame',
-                image: tempCanvas.toDataURL('image/jpeg', 0.8),
+                image: imageData,
                 prompt: prompt,
                 strength: strength,
                 timestamp: Date.now()
             }));
             
-            setTimeout(sendFrame, 33); // 30 FPS input
+            // Send frames at ~20 FPS
+            setTimeout(sendFrame, 50);
         }
         
         function updateStats(data) {
             frameCount++;
+            totalFrames++;
             
             if (data.processing_time) {
                 latencies.push(data.processing_time);
-                if (latencies.length > 30) latencies.shift();
+                if (latencies.length > 50) latencies.shift();
             }
             
             const now = Date.now();
@@ -701,23 +839,44 @@ HTML_CONTENT = """
         
         function stop() {
             streaming = false;
-            if (ws) ws.close();
             
-            const video = document.getElementById('video');
-            if (video.srcObject) {
+            if (totemMode) {
+                exitTotemMode();
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            if (video && video.srcObject) {
                 video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
+            
+            if (ctx) {
+                ctx.clearRect(0, 0, 512, 512);
             }
             
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
             document.getElementById('totemBtn').disabled = true;
+            document.getElementById('statusIndicator').classList.remove('active');
         }
         
         document.addEventListener('keydown', function(event) {
-            if (event.key === 'Escape') {
+            if (event.key === 'Escape' && totemMode) {
                 exitTotemMode();
             }
+            if (event.key === 'F11') {
+                event.preventDefault();
+                if (!totemMode && streaming) {
+                    enterTotemMode();
+                }
+            }
         });
+        
+        window.addEventListener('beforeunload', stop);
     </script>
 </body>
 </html>
@@ -730,7 +889,7 @@ async def get():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("Cliente conectado - Ultra Fast Mode")
+    print("🚀 Cliente conectado - A6000 Optimized Mode")
     
     try:
         while True:
@@ -751,13 +910,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     input_image = input_image.resize((512, 512), Image.Resampling.LANCZOS)
                 
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"❌ Error decodificando imagen: {e}")
                 continue
+            
+            prompt = data.get('prompt', 'portrait')
+            strength = data.get('strength', 0.3)
             
             processor.process_frame(
                 input_image, 
-                data.get('prompt', ''),
-                data.get('strength', 0.3),
+                prompt,
+                strength,
                 data.get('timestamp', time.time() * 1000)
             )
             
@@ -776,21 +938,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error en WebSocket: {e}")
     finally:
-        print("Cliente desconectado")
+        print("🔌 Cliente desconectado")
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("\n" + "="*60)
-    print("🚀 ULTRA FAST DIFFUSION - MAXIMUM SPEED")
-    print("="*60)
-    print("⚡ Dynamic resolution (256/384/512)")
-    print("🎯 1-step inference only")
-    print("⏩ Frame skipping enabled")
-    print("🔧 Optimized for 15+ FPS")
+    print("\n" + "="*80)
+    print("🎨 A6000 OPTIMIZED DIFFUSION")
+    print("="*80)
+    print("⚡ RTX A6000 - 48GB VRAM")
+    print("🎯 Optimizaciones específicas para Ampere")
+    print("📐 Resolución dinámica (256/320/384)")
+    print("🔧 XFormers + TF32 + Channels Last")
+    print("🎮 Custom Prompts + Totem Mode")
     print("🌐 URL: http://0.0.0.0:8000")
-    print("="*60 + "\n")
+    print("="*80 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
