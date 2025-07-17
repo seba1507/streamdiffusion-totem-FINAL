@@ -1,4 +1,3 @@
-cat > polygraphy_patch.py << 'EOF'
 # polygraphy_patch.py
 import polygraphy.backend.trt.util as trt_util
 import tensorrt as trt
@@ -90,4 +89,3 @@ def patched_deserialize(self, *args, **kwargs):
     return engine
 
 trt.Runtime.deserialize_cuda_engine = patched_deserialize
-EOF
