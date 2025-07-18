@@ -222,9 +222,9 @@ class StreamProcessor:
             self.current_guidance = params['guidance_scale']
 
 
-         if image.size != (512, 512):
+        if image.size != (512, 512):
             image = image.resize((512, 512), Image.LANCZOS)
-            input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)"""
+        input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
 
         noise = torch.randn_like(input_tensor) * 0.02
         input_tensor = torch.clamp(input_tensor + noise, 0, 1)
