@@ -130,7 +130,6 @@ class SimpleStreamProcessor:
         pipe = AutoPipelineForImage2Image.from_pretrained(
             MODEL_ID, 
             torch_dtype=dtype,
-            variant="fp16",
             use_safetensors=True
         )
         
