@@ -214,7 +214,10 @@ class TrtEngine:
                 out_shape   = tuple(self.engine.get_tensor_shape(tensor_name))
             self.out = torch.empty(out_shape, dtype=inputs[0].dtype, device=inputs[0].device)
             self.bindings[-1] = int(self.out.data_ptr())
-        self.context.execute_async_v2(self.bindings, self.stream)
+        if hasattr(self.context, "execute_async_v2"):
+            self.context.execute_async_v2(self.bindings, self.stream)
+        else:                                   # TensorRT 10.x
+            self.context.execute_async(self.bindings, self.stream)
         return self.out
 
 
