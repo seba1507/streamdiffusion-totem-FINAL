@@ -18,15 +18,15 @@ torch-tensorrt==2.1.0
 diffusers==0.24.0
 transformers==4.35.2
 accelerate==0.24.0
-safetensors==0.4.1  # AÑADIDO - necesario para tu script
+safetensors==0.4.1
 
 # Core dependencies (version-critical)
-numpy==1.24.1  # Must be <2.0 for PyTorch 2.1.1
-scipy==1.11.4  # Compatible with numpy 1.24.1
+numpy==1.24.1
+scipy==1.11.4
 pillow==10.1.0
 
 # Image processing
-opencv-python-headless==4.8.1.78  # CAMBIADO - mejor para servidores
+opencv-python-headless==4.8.1.78
 imageio==2.36.1
 scikit-image==0.24.0
 
@@ -41,7 +41,7 @@ timm==1.0.11
 fastapi==0.104.1
 uvicorn==0.24.0.post1
 websockets==14.1
-python-multipart==0.0.6  # AÑADIDO - necesario para FastAPI
+python-multipart==0.0.6
 
 # Additional utilities
 fire==0.7.0
