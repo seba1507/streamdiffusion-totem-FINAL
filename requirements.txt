@@ -1,5 +1,5 @@
 # Core PyTorch with CUDA 12.1
---index-url https://download.pytorch.org/whl/cu121
+--index-url https://download.pytorch.org/whl/cu118
 torch==2.1.1
 torchvision==0.16.1
 torchaudio==2.1.1
@@ -50,3 +50,6 @@ onnx-graphsurgeon==0.3.27
 # ONNX tools (from standard PyPI)
 onnx==1.18.0
 onnxruntime-gpu==1.19.2
+
+# Add XFormers (pre-built wheel available)
+xformers==0.0.22.post7
