@@ -10,19 +10,26 @@ pipe = AutoPipelineForImage2Image.from_pretrained(
     MODEL_ID, torch_dtype=torch.float16
 ).to("cuda")
 
+
 # ------------- UNet -------------
 unet = pipe.unet.half().to("cuda")
-dummy_latent = torch.randn(1, 4, 64, 64, dtype=torch.float16, device="cuda")
+
+dummy_latent   = torch.randn(1, 4, 64, 64, dtype=torch.float16, device="cuda")
 dummy_timestep = torch.tensor([0], dtype=torch.float32, device="cuda")
+
+# Embeddings de texto dummy: (batch=1, tokens=77, dim=768)
+dummy_embed = torch.randn(1, 77, 768, dtype=torch.float16, device="cuda")
+
 torch.onnx.export(
-    unet,                         # model
-    (dummy_latent, dummy_timestep),
+    unet,
+    (dummy_latent, dummy_timestep, dummy_embed),   # ← 3 entradas
     f"{OUT}/unet.onnx",
-    input_names=["latent", "timestep"],
+    input_names=["latent", "timestep", "enc_hidden"],
     output_names=["noise_pred"],
     opset_version=17,
     dynamic_axes={
-        "latent": {0: "b", 2: "h", 3: "w"},
+        "latent":     {0: "b", 2: "h", 3: "w"},
+        "enc_hidden": {0: "b", 1: "s"},
         "noise_pred": {0: "b", 2: "h", 3: "w"},
     },
 )
