@@ -1,52 +1,40 @@
-# randn_patch.py  v4 — autónomo (compatible con diffusers 0.24)
+# randn_patch.py  v5 — None seguro + listas + generador único
 import torch
 from functools import wraps
 
-# --- copia de la randn original ---
-_orig_randn = torch.randn  # NO se toca después
+_orig_randn = torch.randn  # copia original
 
-# --- mini‑implementación local ----
-def _local_randn_tensor(shape, *, generator=None, device=None, dtype=None):
+def _randn_single(shape, *, generator, device, dtype):
+    """Devuelve un tensor de ruido para un único generador (o None)."""
+    if generator is None:
+        # Llamada sin el kwarg generator ⇒ PyTorch no se queja
+        return _orig_randn(shape, device=device, dtype=dtype)
+    if isinstance(generator, torch.Generator):
+        return _orig_randn(shape, generator=generator, device=device, dtype=dtype)
+    # Tipo raro → ignoramos generator y delegamos a PyTorch (dejará su propio error)
+    return _orig_randn(shape, device=device, dtype=dtype)
+
+@wraps(_orig_randn)
+def _randn_patched(shape, *args, generator=None, **kwargs):
     """
-    Imita diffusers.utils.randn_tensor para los casos que nos interesan.
-    • shape: tuple[int]
-    • generator: None | torch.Generator | list[torch.Generator]
+    Soporta:
+    • generator=None
+    • generator=torch.Generator
+    • generator=list/tuple[torch.Generator]
     """
-    # (A) una lista de generadores  → un tensor por seed
+    device = kwargs.pop("device", None)
+    dtype  = kwargs.pop("dtype",  None)
+
+    # Lista/tupla ⇒ iterar y apilar
     if isinstance(generator, (list, tuple)):
         tensors = [
-            _local_randn_tensor(shape, generator=g, device=device, dtype=dtype)
+            _randn_single(shape, generator=g, device=device, dtype=dtype)
             for g in generator
         ]
         return torch.stack(tensors, dim=0)
 
-    # (B) generador único o None
-    if generator is not None and not isinstance(generator, torch.Generator):
-        # tipo inválido → ignóralo y deja que _orig_randn lance su propio error
-        generator = None
-
-    return _orig_randn(
-        shape,
-        generator=generator,
-        device=device,
-        dtype=dtype,
-    )
-
-# --------- parche global ----------
-@wraps(_orig_randn)
-def _randn_patched(shape, *args, generator=None, **kwargs):
-    """
-    Llama siempre a _local_randn_tensor, que entiende listas, None y generadores.
-    Todos los casos anteriores del bug quedan cubiertos.
-    """
-    # extraemos device / dtype si se pasaron como kwargs o args
-    device = kwargs.pop("device", None)
-    dtype  = kwargs.pop("dtype",  None)
-
-    # _local_randn_tensor maneja shape, generator, device, dtype
-    return _local_randn_tensor(
-        shape, generator=generator, device=device, dtype=dtype
-    )
+    # Caso único / None
+    return _randn_single(shape, generator=generator, device=device, dtype=dtype)
 
 torch.randn = _randn_patched
-print("✅ Parche randn() v4 autónomo activado")
+print("✅ Parche randn() v5 activado (None seguro)")
