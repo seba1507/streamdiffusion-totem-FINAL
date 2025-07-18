@@ -237,14 +237,7 @@ class StreamProcessor:
             image = image.resize((512, 512), Image.LANCZOS)
         
         # Versión simplificada: usar directamente el stream
-        x_output = self.stream(
-            prompt=params['prompt'],
-            image=image,
-            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            strength=params['strength'],
-            num_inference_steps=50,
-            guidance_scale=params['guidance_scale'],
-        )
+        x_output = self.stream(image)
         
         # Postprocesar la salida
         output_image = postprocess_image(x_output, output_type="pil")[0]
