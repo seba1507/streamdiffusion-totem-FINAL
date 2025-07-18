@@ -297,7 +297,9 @@ app = FastAPI()
 processor = StreamProcessor()
 
 @app.get("/")
-async def root(): return HTMLResponse(content="<h1>StreamDiffusion TOTEM (usar frontend)…</h1>")
+async def root():
+    return HTMLResponse(content=HTML_CONTENT, status_code=200)
+
 
 @app.websocket("/ws")
 async def ws_gateway(ws: WebSocket):
