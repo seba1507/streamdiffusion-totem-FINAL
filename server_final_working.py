@@ -19,26 +19,28 @@ ENGINE_DIR = Path("./tensorrt_engines")
 ENGINE_DIR.mkdir(exist_ok=True)
 WIDTH, HEIGHT = 512, 512
 
-# HTML (simplificado para debugging)
+# HTML simplificado
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>StreamDiffusion Test</title>
+    <title>StreamDiffusion Working</title>
     <style>
-        body { background: #1a1a1a; color: white; font-family: monospace; }
-        video, canvas { width: 512px; height: 512px; border: 2px solid #00ff88; }
-        button { padding: 10px 20px; margin: 10px; }
-        #status { color: #00ff88; margin: 10px; }
+        body { background: #1a1a1a; color: white; font-family: monospace; padding: 20px; }
+        video, canvas { width: 512px; height: 512px; border: 2px solid #00ff88; margin: 10px; }
+        button { padding: 10px 20px; margin: 10px; font-size: 16px; }
+        #status { color: #00ff88; margin: 10px; font-size: 20px; }
+        .container { display: flex; gap: 20px; }
     </style>
 </head>
 <body>
-    <h1>StreamDiffusion Test</h1>
-    <div id="status">Disconnected</div>
-    <video id="video" autoplay muted playsinline></video>
-    <canvas id="output"></canvas>
-    <br>
-    <button onclick="start()">Start</button>
+    <h1>StreamDiffusion TensorRT - L40S</h1>
+    <div id="status">Ready to start</div>
+    <div class="container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="output"></canvas>
+    </div>
+    <button onclick="start()">Start Stream</button>
     <button onclick="stop()">Stop</button>
     <script>
         let ws = null, streaming = false;
@@ -49,12 +51,14 @@ HTML_CONTENT = """
             const ctx = canvas.getContext('2d');
             canvas.width = 512; canvas.height = 512;
             
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 1280, height: 720 } 
+            });
             video.srcObject = stream;
             
-            ws = new WebSocket('ws://localhost:8000/ws');
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
             ws.onopen = () => {
-                document.getElementById('status').textContent = 'Connected';
+                document.getElementById('status').textContent = 'Connected - Streaming';
                 streaming = true;
                 sendFrame();
             };
@@ -84,7 +88,12 @@ HTML_CONTENT = """
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = 512; tempCanvas.height = 512;
             const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(video, 0, 0, 512, 512);
+            
+            // Crop center square
+            const size = Math.min(video.videoWidth, video.videoHeight);
+            const sx = (video.videoWidth - size) / 2;
+            const sy = (video.videoHeight - size) / 2;
+            tempCtx.drawImage(video, sx, sy, size, size, 0, 0, 512, 512);
             
             ws.send(JSON.stringify({
                 image: tempCanvas.toDataURL('image/jpeg', 0.9)
@@ -97,7 +106,9 @@ HTML_CONTENT = """
             streaming = false;
             if (ws) ws.close();
             const video = document.getElementById('video');
-            if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+            }
         }
     </script>
 </body>
@@ -117,82 +128,77 @@ from streamdiffusion.acceleration.tensorrt import accelerate_with_tensorrt
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 
-class SimpleStreamProcessor:
+class StreamProcessor:
     def __init__(self):
-        self.stream = self._setup_stream()
-        self.frame_count = 0
-        self.start_time = time.time()
-        
-    def _setup_stream(self):
         print("🚀 Inicializando StreamDiffusion...")
         
-        # Cargar pipeline
+        # Cargar pipeline SIN variant="fp16"
         pipe = AutoPipelineForImage2Image.from_pretrained(
             MODEL_ID, 
             torch_dtype=dtype,
-            use_safetensors=True
+            use_safetensors=True,
+            safety_checker=None
         )
         
-        # TinyVAE para velocidad
+        # TinyVAE
         pipe.vae = AutoencoderTiny.from_pretrained(TINY_VAE_ID, torch_dtype=dtype)
         pipe = pipe.to(device)
         
-        # StreamDiffusion con configuración básica
-        stream = StreamDiffusion(
+        # StreamDiffusion simple
+        self.stream = StreamDiffusion(
             pipe=pipe,
-            t_index_list=[32, 45],  # Solo 2 pasos para máxima velocidad
+            t_index_list=[32, 45],
             torch_dtype=dtype,
             width=WIDTH,
             height=HEIGHT,
             do_add_noise=True,
             frame_buffer_size=1,
             use_denoising_batch=True,
-            cfg_type="none",  # Sin CFG para máxima velocidad
+            cfg_type="none",
         )
         
-        # Cargar LCM-LoRA
-        stream.load_lcm_lora()
-        stream.fuse_lora()
+        # LCM-LoRA
+        self.stream.load_lcm_lora()
+        self.stream.fuse_lora()
         
         # TensorRT
         try:
-            stream = accelerate_with_tensorrt(stream, ENGINE_DIR, max_batch_size=1)
+            self.stream = accelerate_with_tensorrt(
+                self.stream, 
+                ENGINE_DIR, 
+                max_batch_size=1
+            )
             print("✅ TensorRT acelerado")
         except Exception as e:
-            print(f"⚠️ TensorRT falló: {e}")
+            print(f"⚠️ TensorRT: {e}")
         
         # Preparar
-        stream.prepare(
+        self.stream.prepare(
             prompt="beautiful scenery, high quality",
             num_inference_steps=50,
             guidance_scale=1.0,
         )
         
-        return stream
+        print("✅ Listo para streaming")
+        self.frame_count = 0
+        self.start_time = time.time()
     
     @torch.no_grad()
     def process(self, pil_image):
-        # Asegurar tamaño correcto
+        # Resize si es necesario
         if pil_image.size != (WIDTH, HEIGHT):
             pil_image = pil_image.resize((WIDTH, HEIGHT), Image.LANCZOS)
         
-        # Convertir a tensor
-        image_tensor = self.stream.image_processor.preprocess(
-            pil_image, 
-            height=HEIGHT, 
-            width=WIDTH
-        ).to(device=device, dtype=dtype)
-        
-        # Procesar con StreamDiffusion (método simple)
-        for _ in range(self.stream.batch_size - 1):
-            self.stream(image=image_tensor)
-        
-        output_image = self.stream(image=image_tensor)
+        # Procesar
+        output = self.stream(pil_image)
         
         # Postprocesar
-        output_image = postprocess_image(output_image, output_type="pil")[0]
+        if isinstance(output, torch.Tensor):
+            output_image = postprocess_image(output, output_type="pil")[0]
+        else:
+            output_image = output
         
-        # Calcular FPS
+        # FPS
         self.frame_count += 1
         elapsed = time.time() - self.start_time
         fps = self.frame_count / elapsed if elapsed > 0 else 0
@@ -201,7 +207,7 @@ class SimpleStreamProcessor:
 
 # FastAPI
 app = FastAPI()
-processor = SimpleStreamProcessor()
+processor = StreamProcessor()
 
 @app.get("/")
 async def root():
@@ -216,14 +222,14 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
             
-            # Decodificar imagen
+            # Decodificar
             img_data = base64.b64decode(data['image'].split(',')[1])
             pil_image = Image.open(io.BytesIO(img_data)).convert("RGB")
             
             # Procesar
             output_image, fps = processor.process(pil_image)
             
-            # Codificar resultado
+            # Codificar
             buffered = io.BytesIO()
             output_image.save(buffered, format="JPEG", quality=85)
             img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -242,8 +248,9 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     print("\n" + "="*60)
-    print("STREAMDIFFUSION SIMPLE - SIN ERRORES")
+    print("STREAMDIFFUSION CON TENSORRT")
     print("="*60)
-    print("URL: http://0.0.0.0:8000")
+    print("🌐 http://0.0.0.0:8000")
+    print("🏃 RunPod: https://9tpw6lrh5yp5ll-8000.proxy.runpod.net/")
     print("="*60 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
