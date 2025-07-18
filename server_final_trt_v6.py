@@ -241,7 +241,7 @@ class StreamProcessor:
 
         sd = StreamDiffusion(
             pipe=pipe,
-            t_index_list=[0, 16, 32, 45],
+            t_index_list=[0],
             frame_buffer_size=1,
             width=WIDTH, height=HEIGHT,
         )
