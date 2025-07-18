@@ -214,10 +214,12 @@ class TrtEngine:
                 out_shape   = tuple(self.engine.get_tensor_shape(tensor_name))
             self.out = torch.empty(out_shape, dtype=inputs[0].dtype, device=inputs[0].device)
             self.bindings[-1] = int(self.out.data_ptr())
-        if hasattr(self.context, "execute_async_v2"):
+        if hasattr(self.context, "execute_async_v2"):           # TRT 8/9
             self.context.execute_async_v2(self.bindings, self.stream)
-        else:                                   # TensorRT 10.x
-            self.context.execute_async(self.bindings, self.stream)
+        elif hasattr(self.context, "execute_v2"):               # ✅ TRT 10
+            self.context.execute_v2(self.bindings)              # síncrono
+        else:
+            raise RuntimeError("Método de ejecución TensorRT no soportado")
         return self.out
 
 
