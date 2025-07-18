@@ -26,7 +26,6 @@ WIDTH, HEIGHT = 512, 512
 # ---------------------------------------------------------
 
 # --- INTERFAZ GRÁFICA (HTML) ---
-# Hemos movido aquí el contenido del archivo que borramos para tener todo en un solo lugar.
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
@@ -214,34 +213,47 @@ class StreamProcessor:
     @torch.no_grad()
     def process_frame(self, image: Image.Image, params: dict) -> (Image.Image, dict):
         start_time = time.time()
+        
+        # Actualizar prompt y guidance si cambiaron
         if self.current_prompt != params['prompt'] or self.current_guidance != params['guidance_scale']:
             self.stream.prepare(
                 prompt=params['prompt'], negative_prompt=DEFAULT_NEGATIVE_PROMPT, num_inference_steps=50, guidance_scale=params['guidance_scale'],
             )
             self.current_prompt = params['prompt']
             self.current_guidance = params['guidance_scale']
-
-
+        
+        # CORRECCIÓN: Asegurar que la imagen sea exactamente 512x512
         if image.size != (512, 512):
             image = image.resize((512, 512), Image.LANCZOS)
-            input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)"""
-
+        
+        # Preprocesar imagen
+        input_tensor = self.stream.image_processor.preprocess(image).to(device=device, dtype=dtype)
         noise = torch.randn_like(input_tensor) * 0.02
         input_tensor = torch.clamp(input_tensor + noise, 0, 1)
+        
+        # Procesar con StreamDiffusion
         latents = self.stream.encode_image(input_tensor)
         noisy_latents = self.stream.add_noise(latents, params['strength'])
         denoised_latents = self.stream(image_latents=noisy_latents)
+        
+        # Aplicar suavizado temporal
         if self.last_latents is not None:
-             denoised_latents = torch.lerp(self.last_latents, denoised_latents, 1.0 - params['temporal_smoothing'])
+            denoised_latents = torch.lerp(self.last_latents, denoised_latents, 1.0 - params['temporal_smoothing'])
         self.last_latents = denoised_latents.clone()
+        
+        # Decodificar a imagen
         output_tensor = self.stream.decode_image(denoised_latents)
         output_image = postprocess_image(output_tensor, output_type="pil")[0]
+        
+        # Calcular estadísticas
         processing_time_ms = (time.time() - start_time) * 1000
         self.frame_times.append(processing_time_ms)
-        if len(self.frame_times) > 100: self.frame_times.pop(0)
+        if len(self.frame_times) > 100: 
+            self.frame_times.pop(0)
         avg_latency = sum(self.frame_times) / len(self.frame_times) if self.frame_times else 0
         fps = 1000 / avg_latency if avg_latency > 0 else 0
         stats = {"fps": round(fps, 1), "latency": round(processing_time_ms, 1)}
+        
         return output_image, stats
 
 # --- SERVIDOR WEB FASTAPI ---
@@ -250,7 +262,6 @@ processor = StreamProcessor()
 
 @app.get("/")
 async def get_root():
-    # Ahora el HTML está en este mismo archivo.
     return HTMLResponse(content=HTML_CONTENT)
 
 @app.websocket("/ws")
