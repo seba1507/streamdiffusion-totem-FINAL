@@ -4,6 +4,7 @@ import sys
 
 # IMPORTANTE: Aplicar el parche ANTES de cualquier otra importación
 import polygraphy_patch
+import randn_patch 
 
 import time
 import asyncio
