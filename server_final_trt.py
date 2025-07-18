@@ -188,8 +188,17 @@ class TrtEngine:
         logger = trt.Logger(trt.Logger.ERROR)
         with open(path, "rb") as f, trt.Runtime(logger) as rt:
             self.engine  = rt.deserialize_cuda_engine(f.read())
+            
+            
         self.context = self.engine.create_execution_context()
-        self.bindings = [None] * self.engine.num_bindings
+        # Compatibilidad TRT‑8/9 (num_bindings) y TRT‑10 (num_io_tensors)
+        if hasattr(self.engine, "num_bindings"):
+            n_bindings = self.engine.num_bindings
+        else:                              # TensorRT 10.x
+            n_bindings = self.engine.num_io_tensors
+            
+        self.bindings = [None] * n_bindings
+        
         self.out = None
         self.stream = torch.cuda.current_stream().cuda_stream
         print(f"📦 TRT cargado: {Path(path).name}")
