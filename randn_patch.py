@@ -1,31 +1,32 @@
-# randn_patch.py
+# randn_patch.py  v2
 import torch
 from functools import wraps
 
-_orig_randn = torch.randn  # guardamos la versión original
+_orig_randn = torch.randn  # copia de la función original
 
 @wraps(_orig_randn)
 def _randn_patched(size, *args, generator=None, **kwargs):
     """
-    Acepta una lista de torch.Generator sin romper la API original.
-    • Si generator es lista -> genera un tensor por seed y concatena en dim‑0
-    • Si generator es None o torch.Generator -> llama a la versión original
+    Parche que permite:
+    • generator = torch.Generator  -> se pasa tal cual
+    • generator = list/tuple       -> genera un tensor por seed y concatena
+    • generator = None | inválido  -> NO se pasa el argumento (evita el bug)
     """
-    # Caso normal → sin impacto en rendimiento
-    if generator is None or isinstance(generator, torch.Generator):
+    # Caso 1 ─ lista de generadores
+    if isinstance(generator, (list, tuple)):
+        tensors = [
+            _orig_randn(size, *args, generator=g, **kwargs)
+            for g in generator
+        ]
+        return torch.stack(tensors, dim=0)
+
+    # Caso 2 ─ generador válido
+    if isinstance(generator, torch.Generator):
         return _orig_randn(size, *args, generator=generator, **kwargs)
 
-    # Caso especial: lista de generadores
-    if isinstance(generator, (list, tuple)):
-        tensors = []
-        for g in generator:
-            t = _orig_randn(size, *args, generator=g, **kwargs)
-            tensors.append(t)
-        return torch.stack(tensors, dim=0)  # crea el batch
+    # Caso 3 ─ None u otro valor no soportado → llamamos SIN el kwarg
+    return _orig_randn(size, *args, **kwargs)
 
-    # Cualquier otro tipo (dict, int, etc.) ⇒ reproducir el error original
-    return _orig_randn(size, *args, generator=generator, **kwargs)
-
-# Activar el parche
+# Activar parche
 torch.randn = _randn_patched
-print("✅ Parche randn() multi‑generator activado")
+print("✅ Parche randn() multi‑generator v2 activado")
