@@ -267,7 +267,7 @@ class StreamProcessor:
         sd.decode_latent = decode_latent_trt.__get__(sd)
 
         def predict_noise_trt(self, latent_in, t, enc_hidden):
-            return self.trt_unet(latent_in, t, enc_hidden)
+            return self.trt_unet(latent_in, enc_hidden, t)
         sd._predict_noise = predict_noise_trt.__get__(sd)  # nombre según versión
 
         sd.prepare(prompt=self.current_prompt,
