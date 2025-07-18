@@ -181,38 +181,42 @@ from PIL import Image
 import tensorrt as trt
 class TrtEngine:
     """
-    Wrapper minimalista para ejecutar planes .engine con 1..N inputs / 1 output.
-    Supone que los bindings 0..N‑1 son inputs y el último es output.
+    Wrapper minimalista compat‑TensorRT 8/9 (num_bindings) y 10 (num_io_tensors).
+    Soporta N inputs, 1 output – suficiente para VAE Encoder/Decoder y UNet.
     """
     def __init__(self, path: str):
         logger = trt.Logger(trt.Logger.ERROR)
         with open(path, "rb") as f, trt.Runtime(logger) as rt:
-            self.engine  = rt.deserialize_cuda_engine(f.read())
-            
-            
+            self.engine = rt.deserialize_cuda_engine(f.read())
         self.context = self.engine.create_execution_context()
-        # Compatibilidad TRT‑8/9 (num_bindings) y TRT‑10 (num_io_tensors)
+        # --- compatibilidad versiones ---
         if hasattr(self.engine, "num_bindings"):
-            n_bindings = self.engine.num_bindings
-        else:                              # TensorRT 10.x
-            n_bindings = self.engine.num_io_tensors
-            
-        self.bindings = [None] * n_bindings
-        
-        self.out = None
-        self.stream = torch.cuda.current_stream().cuda_stream
+            self.n_bindings = self.engine.num_bindings
+        else:                             # TensorRT 10
+            self.n_bindings = self.engine.num_io_tensors
+        # ---------------------------------
+        self.bindings = [None] * self.n_bindings
+        self.out      = None
+        self.stream   = torch.cuda.current_stream().cuda_stream
         print(f"📦 TRT cargado: {Path(path).name}")
 
     def __call__(self, *inputs: torch.Tensor) -> torch.Tensor:
-        assert len(inputs) == self.engine.num_bindings - 1, "Nº de inputs != bindings‑1"
+        assert len(inputs) == self.n_bindings - 1, \
+            f"Se esperaban {self.n_bindings-1} tensores, recibidos {len(inputs)}"
         for idx, t in enumerate(inputs):
             self.bindings[idx] = int(t.data_ptr())
         if self.out is None:
-            out_shape = tuple(self.engine.get_binding_shape(self.engine.num_bindings - 1))
+            # índice del output = último binding
+            if hasattr(self.engine, "get_binding_shape"):
+                out_shape = tuple(self.engine.get_binding_shape(self.n_bindings - 1))
+            else:  # fallback polygraphy_patch ya añadió compatibilidad
+                tensor_name = self.engine.get_tensor_name(self.n_bindings - 1)
+                out_shape   = tuple(self.engine.get_tensor_shape(tensor_name))
             self.out = torch.empty(out_shape, dtype=inputs[0].dtype, device=inputs[0].device)
             self.bindings[-1] = int(self.out.data_ptr())
         self.context.execute_async_v2(self.bindings, self.stream)
         return self.out
+
 
 # ----------- PIPELINE / PROCESSOR --------------------------------------------
 class StreamProcessor:
